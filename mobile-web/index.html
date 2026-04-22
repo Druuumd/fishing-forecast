@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KVH Forecast Mobile UX</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="card">
+      <h1>KVH Forecast</h1>
+      <p class="muted">Mobile UX beta client</p>
+      <label class="field">
+        <span>Base URL</span>
+        <input id="baseUrl" value="http://84.22.146.195:8000" />
+      </label>
+      <div class="row">
+        <button id="btnSaveBase">Save</button>
+        <button id="btnCheckReady" class="secondary">Check Ready</button>
+      </div>
+      <pre id="readyOut" class="out"></pre>
+    </header>
+
+    <section class="card">
+      <h2>1) Login</h2>
+      <label class="field"><span>Username</span><input id="username" value="demo" /></label>
+      <label class="field"><span>Password</span><input id="password" value="demo123" type="password" /></label>
+      <div class="row">
+        <button id="btnLogin">Login</button>
+        <button id="btnLogout" class="secondary">Logout</button>
+      </div>
+      <pre id="loginOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>2) Forecast</h2>
+      <label class="field"><span>Species</span>
+        <select id="species">
+          <option value="pike">pike</option>
+          <option value="perch">perch</option>
+        </select>
+      </label>
+      <button id="btnForecast">Load Forecast</button>
+      <pre id="forecastOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>3) Catch + Offline Queue</h2>
+      <label class="field"><span>Species</span>
+        <select id="catchSpecies">
+          <option value="pike">pike</option>
+          <option value="perch" selected>perch</option>
+        </select>
+      </label>
+      <label class="field"><span>Score</span><input id="catchScore" type="number" min="0" max="5" step="0.1" value="4.1" /></label>
+      <label class="field"><span>Latitude</span><input id="catchLat" type="number" step="0.0001" value="55.99" /></label>
+      <label class="field"><span>Longitude</span><input id="catchLon" type="number" step="0.0001" value="92.88" /></label>
+      <label class="field"><span>Note</span><input id="catchNote" value="mobile-beta" /></label>
+      <div class="row">
+        <button id="btnCatch">Send Catch</button>
+        <button id="btnQueueCatch" class="secondary">Queue Offline</button>
+        <button id="btnSyncQueue" class="secondary">Sync Queue</button>
+      </div>
+      <pre id="catchOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>4) Consent</h2>
+      <label class="check"><input type="checkbox" id="geoAllowed" /> Geo allowed</label>
+      <label class="check"><input type="checkbox" id="pushAllowed" /> Push allowed</label>
+      <label class="check"><input type="checkbox" id="analyticsAllowed" /> Analytics allowed</label>
+      <div class="row">
+        <button id="btnLoadConsent" class="secondary">Load</button>
+        <button id="btnSaveConsent">Save</button>
+      </div>
+      <pre id="consentOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>5) DSAR</h2>
+      <div class="row">
+        <button id="btnExportData">Export My Data</button>
+        <button id="btnDeleteData" class="danger">Delete My Data</button>
+      </div>
+      <pre id="dsarOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>6) Legal Links</h2>
+      <button id="btnLegalInfo">Load Legal Info</button>
+      <pre id="legalOut" class="out"></pre>
+      <ul id="legalLinks"></ul>
+    </section>
+
+    <section class="card">
+      <h2>7) Map + Geo</h2>
+      <div class="row">
+        <button id="btnUseCurrentLocation">Use Current Location</button>
+        <button id="btnOpenMap" class="secondary">Open Map</button>
+      </div>
+      <iframe id="mapFrame" class="map" title="Map"></iframe>
+      <pre id="mapOut" class="out"></pre>
+    </section>
+
+    <section class="card">
+      <h2>8) Push (Web beta)</h2>
+      <div class="row">
+        <button id="btnEnablePush">Enable Notifications</button>
+        <button id="btnTestPush" class="secondary">Test Notification</button>
+      </div>
+      <pre id="pushOut" class="out"></pre>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

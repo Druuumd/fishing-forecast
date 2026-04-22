@@ -1,0 +1,11 @@
+# BEGIN_KVH_FORECAST
+kvh-forecast.ru, www.kvh-forecast.ru {
+    encode gzip zstd
+    reverse_proxy 172.17.0.1:8081
+}
+
+api.kvh-forecast.ru {
+    encode gzip zstd
+    reverse_proxy 172.17.0.1:8000
+}
+# END_KVH_FORECAST

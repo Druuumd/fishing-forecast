@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.env
+.env.*
+!.env.stage.example
+!.env.prod.example
+.venv/
+venv/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Runtime artifacts
+logs/
+node_modules/
+web/node_modules/
+
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/keystore.properties
+android/keystore/
+*.iml
