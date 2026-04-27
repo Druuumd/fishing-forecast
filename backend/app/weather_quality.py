@@ -44,6 +44,14 @@ class WeatherQualityService:
                 range_issues.append({"day": str(row.day), "field": "water_temp_c", "value": row.water_temp_c})
             if not (0 <= row.moon_phase <= 1):
                 range_issues.append({"day": str(row.day), "field": "moon_phase", "value": row.moon_phase})
+            if not (0 <= row.cloud_cover_pct <= 100):
+                range_issues.append({"day": str(row.day), "field": "cloud_cover_pct", "value": row.cloud_cover_pct})
+            if not (0 <= row.precipitation_mm <= 200):
+                range_issues.append({"day": str(row.day), "field": "precipitation_mm", "value": row.precipitation_mm})
+            if not (0 <= row.humidity_pct <= 100):
+                range_issues.append({"day": str(row.day), "field": "humidity_pct", "value": row.humidity_pct})
+            if not (0 <= row.daylight_hours <= 24):
+                range_issues.append({"day": str(row.day), "field": "daylight_hours", "value": row.daylight_hours})
 
         checks = {
             "freshness": {

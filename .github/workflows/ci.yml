@@ -7,7 +7,8 @@ on:
     branches: ["main", "develop"]
 
 jobs:
-  build-and-validate:
+  backend:
+    name: Backend (pytest + syntax)
     runs-on: ubuntu-latest
 
     steps:
@@ -18,14 +19,37 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
 
       - name: Validate backend syntax
-        run: python -m compileall backend/app backend/alembic/versions
+        working-directory: backend
+        run: python -m compileall app alembic/versions
+
+      - name: Run regression tests
+        working-directory: backend
+        # -p no:cacheprovider: avoid creating .pytest_cache (read-only fs in some runners)
+        # --strict-markers: fail on undeclared @pytest.mark.* (catches typos early)
+        run: pytest tests/ -v --tb=short -p no:cacheprovider --strict-markers
+
+  web:
+    name: Web (vite build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
         working-directory: web
@@ -34,3 +58,10 @@ jobs:
       - name: Build web frontend
         working-directory: web
         run: npm run build
+
+      - name: Upload built bundle as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7

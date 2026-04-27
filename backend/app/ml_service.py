@@ -34,7 +34,7 @@ class MlService:
                 reason=f"not enough records: {len(records)} < {self._settings.ml_retrain_min_records}",
             )
 
-        by_species: dict[str, list] = {"pike": [], "perch": []}
+        by_species: dict[str, list] = {"pike": [], "perch": [], "bream": []}
         for row in records:
             if row.species in by_species:
                 by_species[row.species].append(row)
@@ -59,6 +59,11 @@ class MlService:
                     wind_speed_m_s=row.linked_wind_speed_m_s,
                     wind_direction_deg=row.linked_wind_direction_deg,
                     moon_phase=row.linked_moon_phase,
+                    cloud_cover_pct=getattr(row, "linked_cloud_cover_pct", 0.0) or 0.0,
+                    precipitation_mm=getattr(row, "linked_precipitation_mm", 0.0) or 0.0,
+                    humidity_pct=getattr(row, "linked_humidity_pct", 0.0) or 0.0,
+                    pressure_trend_24h_hpa=getattr(row, "linked_pressure_trend_24h_hpa", 0.0) or 0.0,
+                    daylight_hours=getattr(row, "linked_daylight_hours", 12.0) or 12.0,
                 )
                 base_score, _ = self._forecast_service.score_species(species, snapshot, bias=0.0)
                 base_predictions.append(base_score)

@@ -15,13 +15,46 @@ from app.catch_repository import CatchRepository
 from app.consent_repository import ConsentRepository
 from app.db import create_db_engine
 from app.errors import ApiError, api_error_payload
-from app.forecast_service import ForecastService
+from app.forecast_service import ForecastService, WaterLevelContext
 from app.logging_config import configure_logging, new_trace_id, trace_id_ctx
 from app.ml_repository import MlRepository
 from app.ml_service import MlService, PublishResult, RetrainResult
 from app.schemas import CatchCreate, CatchRecord, ConsentRecord, ConsentUpdate, FishSpecies, ForecastResponse, utcnow
 from app.schemas import DeleteMeDataResponse, LegalInfoResponse, MeDataExportResponse
+from app.schemas import (
+    PushConditionTypeInfo,
+    PushConditionTypesResponse,
+    PushSubscriptionCreate,
+    PushSubscriptionRecord,
+    PushVapidPublicKeyResponse,
+    WarningItem,
+    WarningsResponse,
+    WaterTempReadingCreate,
+    WaterTempReadingRecord,
+    WaterTempReadingsResponse,
+    WaterLevelCreate,
+    WaterLevelHistoryPoint,
+    WaterLevelHistoryResponse,
+    WaterLevelResponse,
+    WaterLevelStateResponse,
+    WeatherHistoryPoint,
+    WeatherHistoryResponse,
+)
 from app.settings import get_settings
+from app.water_level_service import (
+    WaterLevelIngestService,
+    WaterLevelReading,
+    WaterLevelRepository,
+    WaterLevelService,
+)
+from app.warnings_service import compute_warnings
+from app.water_level_sources import create_source_from_settings
+from app.water_temp_readings import (
+    WaterTempReadingRepository,
+    make_reading as make_water_temp_reading,
+    validate_reading as validate_water_temp_reading,
+)
+from app.push_service import PushService, PushSubscriptionRepository
 from app.weather_ingest import WeatherIngestResult, WeatherIngestService
 from app.weather_quality import WeatherQualityResult, WeatherQualityService
 from app.weather_repository import WeatherRepository
@@ -34,6 +67,14 @@ catch_repository = CatchRepository(db_engine)
 consent_repository = ConsentRepository(db_engine)
 weather_repository = WeatherRepository(db_engine)
 ml_repository = MlRepository(db_engine)
+water_level_repository = WaterLevelRepository(db_engine)
+water_level_service = WaterLevelService(water_level_repository)
+water_level_ingest_service = WaterLevelIngestService(
+    source=create_source_from_settings(settings),
+    repository=water_level_repository,
+)
+push_repository = PushSubscriptionRepository(db_engine)
+water_temp_reading_repository = WaterTempReadingRepository(db_engine)
 redis_client = create_redis_client(settings)
 forecast_cache = ForecastCache(redis_client, ttl_sec=settings.forecast_cache_ttl_sec)
 catch_guard = CatchGuard(
@@ -53,10 +94,30 @@ forecast_service = ForecastService(
     catch_repository=catch_repository,
     historical_snapshot_loader=_load_historical_snapshots,
     region=settings.forecast_region,
+    region_elevation_m=settings.forecast_region_elevation_m,
 )
 weather_ingest_service = WeatherIngestService(settings, weather_repository)
 weather_quality_service = WeatherQualityService(settings, weather_repository)
 ml_service = MlService(settings, ml_repository, forecast_service)
+push_service = PushService(
+    repository=push_repository,
+    vapid_private_key_pem=settings.vapid_private_key_pem,
+    vapid_subject=settings.vapid_subject,
+    forecast_service=forecast_service,
+    lookahead_days=settings.push_lookahead_days,
+)
+
+SUPPORTED_SPECIES: tuple[str, ...] = ("pike", "perch", "bream")
+SUPPORTED_ZONES: tuple[str, ...] = (
+    "tubinsky", "karasug", "ubey", "yezagash", "syda", "koma",
+    "izhul", "ogur", "anash", "derbino", "sisim", "biryusa", "main_channel",
+)
+FORECAST_CACHE_KEYS: list[str] = []
+for _zone in (None, *SUPPORTED_ZONES):
+    _zone_part = _zone or "default"
+    FORECAST_CACHE_KEYS.append(f"forecast:v2:{_zone_part}:all")
+    for _sp in SUPPORTED_SPECIES:
+        FORECAST_CACHE_KEYS.append(f"forecast:v2:{_zone_part}:{_sp}")
 
 app = FastAPI(title=settings.app_name)
 allowed_origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
@@ -232,15 +293,37 @@ async def legal_info() -> LegalInfoResponse:
 
 @app.get("/forecast", response_model=ForecastResponse)
 @app.get("/v1/forecast", response_model=ForecastResponse)
-async def get_forecast(species: FishSpecies | None = None) -> ForecastResponse:
-    cache_key = f"forecast:v1:{species or 'all'}"
+async def get_forecast(
+    species: FishSpecies | None = None,
+    zone: str | None = None,
+) -> ForecastResponse:
+    if zone not in (None, *SUPPORTED_ZONES):
+        zone = None
+    zone_part = zone or "default"
+    cache_key = f"forecast:v2:{zone_part}:{species or 'all'}"
     cached_payload = forecast_cache.get(cache_key)
     if cached_payload:
         return ForecastResponse.model_validate_json(cached_payload)
 
     today = datetime.now(UTC).date()
-    snapshots = weather_repository.get_window(start_day=today, days=7)
-    last_updated_at = weather_repository.get_last_updated_at()
+
+    # Try to load zone-specific snapshots first; fall back to "default" zone
+    # snapshots if the requested bay hasn't been ingested yet. The flag
+    # apply_zone_temp_offset tells the scoring layer whether to add the
+    # heuristic Δ°C offset (only needed when we're using default-zone data
+    # to approximate a bay).
+    apply_zone_temp_offset = True
+    snapshots: list = []
+    last_updated_at = None
+    if zone:
+        zone_snapshots = weather_repository.get_window(start_day=today, days=7, zone=zone)
+        if len(zone_snapshots) >= 7:
+            snapshots = zone_snapshots
+            last_updated_at = weather_repository.get_last_updated_at(zone=zone)
+            apply_zone_temp_offset = False
+    if not snapshots:
+        snapshots = weather_repository.get_window(start_day=today, days=7, zone="default")
+        last_updated_at = weather_repository.get_last_updated_at(zone="default")
     is_fresh = False
     if last_updated_at is not None:
         freshness_deadline = datetime.now(UTC) - timedelta(hours=settings.forecast_freshness_hours)
@@ -249,6 +332,14 @@ async def get_forecast(species: FishSpecies | None = None) -> ForecastResponse:
     active_model = ml_service.active_model()
     species_bias_map = active_model["species_bias"] if active_model else None
 
+    water_state = water_level_service.current_state(today=today)
+    water_level_context = WaterLevelContext(
+        latest_level_m=water_state.latest_level_m,
+        trend_7d_m=water_state.trend_7d_m,
+        source=water_state.source,
+        is_fresh=water_state.is_fresh,
+    )
+
     if len(snapshots) >= 7 and is_fresh:
         response = forecast_service.build_forecast_from_snapshots(
             snapshots=snapshots[:7],
@@ -256,6 +347,9 @@ async def get_forecast(species: FishSpecies | None = None) -> ForecastResponse:
             stale=False,
             last_updated_at=last_updated_at,
             species_bias_map=species_bias_map,
+            water_level=water_level_context,
+            zone=zone,
+            apply_zone_temp_offset=apply_zone_temp_offset,
         )
     else:
         response = forecast_service.build_forecast_from_snapshots(
@@ -264,9 +358,342 @@ async def get_forecast(species: FishSpecies | None = None) -> ForecastResponse:
             stale=True,
             last_updated_at=last_updated_at,
             species_bias_map=species_bias_map,
+            water_level=water_level_context,
+            zone=zone,
+            apply_zone_temp_offset=True,
         )
     forecast_cache.set(cache_key, response.model_dump_json())
     return response
+
+
+@app.post(
+    "/v1/water-temp-readings",
+    response_model=WaterTempReadingRecord,
+    status_code=status.HTTP_201_CREATED,
+)
+async def submit_water_temp_reading(
+    payload: WaterTempReadingCreate,
+    auth_user: AuthUser = Depends(get_current_user),
+) -> WaterTempReadingRecord:
+    """User-submitted thermal profile measurement.
+
+    Validates aggressively (GPS bbox, temperature ranges, freshness,
+    surface > below). Returns 422 with field-level errors when invalid;
+    the UI uses them to highlight the offending input.
+    """
+    vr = validate_water_temp_reading(
+        measured_at=payload.measured_at,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        surface_temp_c=payload.surface_temp_c,
+        thermocline_depth_m=payload.thermocline_depth_m,
+        below_thermocline_temp_c=payload.below_thermocline_temp_c,
+    )
+    if not vr.valid:
+        raise ApiError(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="WATER_TEMP_READING_INVALID",
+            message="Замер не прошёл валидацию.",
+            retryable=False,
+            details={"field_errors": vr.errors},
+        )
+    reading = make_water_temp_reading(
+        user_id=auth_user.user_id,
+        measured_at=payload.measured_at,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        surface_temp_c=payload.surface_temp_c,
+        thermocline_depth_m=payload.thermocline_depth_m,
+        below_thermocline_temp_c=payload.below_thermocline_temp_c,
+        instrument=payload.instrument,
+        note=payload.note,
+    )
+    saved = water_temp_reading_repository.save(reading)
+    logger.info(
+        "water_temp_reading_saved",
+        extra={
+            "event_type": "water_temp_reading",
+            "user_id": auth_user.user_id,
+            "zone": saved.zone,
+            "surface_temp_c": saved.surface_temp_c,
+            "has_thermocline": saved.thermocline_depth_m is not None,
+        },
+    )
+    return WaterTempReadingRecord(**saved.__dict__)
+
+
+@app.get("/v1/water-temp-readings", response_model=WaterTempReadingsResponse)
+async def list_water_temp_readings(
+    zone: str | None = None,
+    limit: int = 100,
+    days: int = 30,
+) -> WaterTempReadingsResponse:
+    """Recent user-submitted readings — public read for crowdsourced map."""
+    if zone is not None and zone not in SUPPORTED_ZONES:
+        zone = None
+    limit = max(1, min(500, limit))
+    days = max(1, min(60, days))
+    readings = water_temp_reading_repository.list_recent(
+        zone=zone, limit=limit, max_age_days=days
+    )
+    return WaterTempReadingsResponse(
+        points=[WaterTempReadingRecord(**r.__dict__) for r in readings]
+    )
+
+
+@app.get("/v1/warnings", response_model=WarningsResponse)
+async def warnings(zone: str | None = None) -> WarningsResponse:
+    """Adverse-conditions warnings — public read.
+
+    Loads the same forecast we'd return from /v1/forecast for the given
+    zone, applies the warnings ruleset, and returns active warnings.
+    Cheap to call; cached at the forecast layer (cache key includes zone).
+    """
+    if zone not in (None, *SUPPORTED_ZONES):
+        zone = None
+    today = datetime.now(UTC).date()
+    apply_zone_temp_offset = True
+    snapshots: list = []
+    if zone:
+        zone_snapshots = weather_repository.get_window(start_day=today, days=7, zone=zone)
+        if len(zone_snapshots) >= 7:
+            snapshots = zone_snapshots
+            apply_zone_temp_offset = False
+    if not snapshots:
+        snapshots = weather_repository.get_window(start_day=today, days=7, zone="default")
+
+    water_state = water_level_service.current_state(today=today)
+    water_level_context = WaterLevelContext(
+        latest_level_m=water_state.latest_level_m,
+        trend_7d_m=water_state.trend_7d_m,
+        source=water_state.source,
+        is_fresh=water_state.is_fresh,
+    )
+
+    if len(snapshots) < 7:
+        snapshots = forecast_service.default_snapshots()
+    response = forecast_service.build_forecast_from_snapshots(
+        snapshots=snapshots[:7],
+        species=None,
+        stale=False,
+        last_updated_at=None,
+        species_bias_map=None,
+        water_level=water_level_context,
+        zone=zone,
+        apply_zone_temp_offset=apply_zone_temp_offset,
+    )
+    # Use first species's day-by-day shape (all species share the same
+    # weather/factors mix per day; warnings only depend on weather + gates).
+    pike_days = [d for d in response.days if d.species == "pike"]
+
+    items = compute_warnings(
+        today=today,
+        forecast_days=pike_days,
+        water_level_state=water_state,
+        spawning_ban_start_md=settings.spawning_ban_start_md,
+        spawning_ban_end_md=settings.spawning_ban_end_md,
+    )
+    return WarningsResponse(
+        generated_at=utcnow(),
+        zone=response.zone,
+        zone_label=response.zone_label,
+        warnings=[
+            WarningItem(
+                code=w.code,
+                severity=w.severity,
+                title=w.title,
+                body=w.body,
+                valid_from=w.valid_from,
+                valid_to=w.valid_to,
+            )
+            for w in items
+        ],
+    )
+
+
+@app.get("/v1/water-level/history", response_model=WaterLevelHistoryResponse)
+async def water_level_history(days: int = 30) -> WaterLevelHistoryResponse:
+    days = max(1, min(365, days))
+    today = datetime.now(UTC).date()
+    start = today - timedelta(days=days - 1)
+    readings = water_level_repository.get_window(start, today)
+    points = [
+        WaterLevelHistoryPoint(day=r.day, level_m=r.level_m, source=r.source)
+        for r in readings
+    ]
+    return WaterLevelHistoryResponse(days_requested=days, points=points)
+
+
+@app.get("/v1/weather/history", response_model=WeatherHistoryResponse)
+async def weather_history(days: int = 14) -> WeatherHistoryResponse:
+    days = max(1, min(60, days))
+    today = datetime.now(UTC).date()
+    start = today - timedelta(days=days - 1)
+    snapshots = weather_repository.get_window(start_day=start, days=days)
+    points: list[WeatherHistoryPoint] = []
+    for s in snapshots:
+        surface = forecast_service._surface_pressure_hpa(s.air_temp_c, s.pressure_hpa)
+        points.append(
+            WeatherHistoryPoint(
+                day=s.day,
+                air_temp_c=s.air_temp_c,
+                pressure_hpa=s.pressure_hpa,
+                surface_pressure_hpa=round(surface, 1),
+                water_temp_c=s.water_temp_c,
+                wind_speed_m_s=s.wind_speed_m_s,
+                cloud_cover_pct=s.cloud_cover_pct,
+                precipitation_mm=s.precipitation_mm,
+                pressure_trend_24h_hpa=s.pressure_trend_24h_hpa,
+            )
+        )
+    return WeatherHistoryResponse(days_requested=days, points=points)
+
+
+@app.get("/v1/push/vapid-public-key", response_model=PushVapidPublicKeyResponse)
+async def push_vapid_public_key() -> PushVapidPublicKeyResponse:
+    return PushVapidPublicKeyResponse(
+        public_key=settings.vapid_public_key_b64,
+        enabled=push_service.enabled,
+    )
+
+
+@app.get("/v1/push/condition-types", response_model=PushConditionTypesResponse)
+async def push_condition_types() -> PushConditionTypesResponse:
+    """Catalog of available conditions + their parameter shapes for the UI."""
+    types = [
+        PushConditionTypeInfo(
+            type="score_min", label="Минимальная оценка",
+            params_schema=[{"name": "min", "kind": "number", "min": 0.0, "max": 5.0, "step": 0.1, "default": 3.5, "label": "оценка ≥"}],
+        ),
+        PushConditionTypeInfo(
+            type="wind_max", label="Максимальный ветер",
+            params_schema=[{"name": "max_m_s", "kind": "number", "min": 0.0, "max": 20.0, "step": 0.5, "default": 6.0, "label": "ветер ≤ м/с"}],
+        ),
+        PushConditionTypeInfo(type="no_pressure_shock", label="Без барического шока"),
+        PushConditionTypeInfo(type="no_thermal_shock", label="Без термошока"),
+        PushConditionTypeInfo(type="no_severe_weather", label="Без шторма"),
+        PushConditionTypeInfo(
+            type="no_precipitation", label="Без сильных осадков",
+            params_schema=[{"name": "max_mm", "kind": "number", "min": 0.0, "max": 30.0, "step": 0.1, "default": 0.5, "label": "осадки ≤ мм"}],
+        ),
+        PushConditionTypeInfo(
+            type="water_temp_min", label="Минимальная температура воды",
+            params_schema=[{"name": "min", "kind": "number", "min": -2.0, "max": 30.0, "step": 0.5, "default": 8.0, "label": "Tw ≥ °C"}],
+        ),
+        PushConditionTypeInfo(
+            type="water_temp_max", label="Максимальная температура воды",
+            params_schema=[{"name": "max", "kind": "number", "min": 0.0, "max": 30.0, "step": 0.5, "default": 24.0, "label": "Tw ≤ °C"}],
+        ),
+        PushConditionTypeInfo(
+            type="pressure_stable", label="Стабильное давление",
+            params_schema=[{"name": "delta_max", "kind": "number", "min": 0.5, "max": 15.0, "step": 0.5, "default": 4.0, "label": "|ΔP/24h| ≤ hPa"}],
+        ),
+        PushConditionTypeInfo(
+            type="cloud_max", label="Не слишком облачно",
+            params_schema=[{"name": "pct", "kind": "number", "min": 0.0, "max": 100.0, "step": 5.0, "default": 70.0, "label": "облачность ≤ %"}],
+        ),
+        PushConditionTypeInfo(
+            type="daylight_min", label="Длинный световой день",
+            params_schema=[{"name": "hours", "kind": "number", "min": 6.0, "max": 20.0, "step": 0.5, "default": 12.0, "label": "часов ≥"}],
+        ),
+        PushConditionTypeInfo(
+            type="lookahead_max_days", label="В ближайшие N дней",
+            params_schema=[{"name": "days", "kind": "integer", "min": 1, "max": 7, "step": 1, "default": 3, "label": "не дальше чем"}],
+        ),
+        PushConditionTypeInfo(type="weekend_only", label="Только в выходные"),
+    ]
+    return PushConditionTypesResponse(types=types)
+
+
+@app.post("/v1/push/subscriptions", response_model=PushSubscriptionRecord, status_code=status.HTTP_201_CREATED)
+async def push_subscribe(
+    payload: PushSubscriptionCreate,
+    auth_user: AuthUser = Depends(get_current_user),
+) -> PushSubscriptionRecord:
+    if not push_service.enabled:
+        raise ApiError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="PUSH_DISABLED",
+            message="push notifications not configured (no VAPID keys)",
+            retryable=False,
+        )
+    conditions = [c.model_dump() for c in payload.conditions]
+    sub = push_repository.upsert(
+        user_id=auth_user.user_id,
+        endpoint=payload.endpoint,
+        p256dh=payload.keys.p256dh,
+        auth_secret=payload.keys.auth,
+        name=payload.name,
+        scope_zone=payload.scope_zone or None,
+        scope_species=payload.scope_species,
+        conditions=conditions,
+    )
+    logger.info(
+        "push_subscription_upserted",
+        extra={
+            "event_type": "push_subscribe",
+            "user_id": auth_user.user_id,
+            "scope_zone": sub.scope_zone,
+            "scope_species": sub.scope_species,
+            "conditions_count": len(sub.conditions),
+            "sub_id": sub.id,
+        },
+    )
+    return _sub_to_record(sub)
+
+
+@app.get("/v1/push/subscriptions/me", response_model=list[PushSubscriptionRecord])
+async def push_subscriptions_me(
+    auth_user: AuthUser = Depends(get_current_user),
+) -> list[PushSubscriptionRecord]:
+    subs = push_repository.list_by_user(auth_user.user_id)
+    return [_sub_to_record(s) for s in subs]
+
+
+def _sub_to_record(sub) -> PushSubscriptionRecord:
+    return PushSubscriptionRecord(
+        id=sub.id, user_id=sub.user_id, endpoint=sub.endpoint,
+        name=sub.name, scope_zone=sub.scope_zone, scope_species=sub.scope_species,
+        conditions=sub.conditions,
+        last_notified_for_day=sub.last_notified_for_day,
+        created_at=sub.created_at, updated_at=sub.updated_at,
+    )
+
+
+@app.delete("/v1/push/subscriptions/{sub_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def push_unsubscribe(
+    sub_id: str,
+    auth_user: AuthUser = Depends(get_current_user),
+) -> None:
+    deleted = push_repository.delete(sub_id=sub_id, user_id=auth_user.user_id)
+    if not deleted:
+        raise ApiError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="PUSH_SUB_NOT_FOUND",
+            message="subscription not found",
+            retryable=False,
+        )
+    return None
+
+
+@app.post("/v1/push/test")
+async def push_test(auth_user: AuthUser = Depends(get_current_user)) -> dict:
+    if not push_service.enabled:
+        raise ApiError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="PUSH_DISABLED", message="push not configured", retryable=False,
+        )
+    subs = push_repository.list_by_user(auth_user.user_id)
+    if not subs:
+        return {"status": "no_subscription"}
+    sub = subs[0]
+    ok = push_service.send(
+        sub=sub,
+        title="🎣 Тестовое уведомление",
+        body="Push-уведомления работают. Хорошего клёва!",
+        data={"test": True},
+    )
+    return {"status": "ok" if ok else "failed", "sub_id": sub.id}
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -278,7 +705,63 @@ async def auth_login(payload: LoginRequest) -> LoginResponse:
 @app.post("/v1/admin/ingest/weather")
 async def ingest_weather(auth_user: AuthUser = Depends(get_current_user)) -> dict:
     result: WeatherIngestResult = weather_ingest_service.ingest_daily_forecast()
-    forecast_cache.delete_many(["forecast:v1:all", "forecast:v1:pike", "forecast:v1:perch"])
+    forecast_cache.delete_many(FORECAST_CACHE_KEYS)
+    # Best-effort water level refresh — never fails the weather ingest.
+    water_level_ingest_outcome: dict | None = None
+    try:
+        wl_result = water_level_ingest_service.ingest()
+        water_level_ingest_outcome = {
+            "status": wl_result.status,
+            "reason": wl_result.reason,
+            "saved": (
+                {"day": str(wl_result.saved.day), "level_m": wl_result.saved.level_m, "source": wl_result.saved.source}
+                if wl_result.saved
+                else None
+            ),
+        }
+    except Exception:
+        logger.exception("water_level_ingest_failed_in_weather_ingest")
+        water_level_ingest_outcome = {"status": "error", "reason": "exception (see logs)"}
+    # Dispatch push notifications best-effort. Each subscription gets a
+    # notification when its zone+species forecast meets the threshold,
+    # deduplicated by last_notified_for_day. Disabled silently if no
+    # VAPID keys are configured.
+    push_outcome: dict | None = None
+    today = datetime.now(UTC).date()
+    water_state = water_level_service.current_state(today=today)
+    water_level_context = WaterLevelContext(
+        latest_level_m=water_state.latest_level_m,
+        trend_7d_m=water_state.trend_7d_m,
+        source=water_state.source,
+        is_fresh=water_state.is_fresh,
+    )
+
+    def _snapshots_for_zone(zone_code):
+        if zone_code:
+            zone_snapshots = weather_repository.get_window(start_day=today, days=7, zone=zone_code)
+            if len(zone_snapshots) >= 7:
+                return zone_snapshots
+        return weather_repository.get_window(start_day=today, days=7, zone="default")
+
+    try:
+        if push_service.enabled:
+            outcome = push_service.dispatch_for_all(
+                snapshots_loader=_snapshots_for_zone,
+                water_level=water_level_context,
+            )
+            push_outcome = {
+                "sent": outcome.sent,
+                "skipped_no_match": outcome.skipped_no_match,
+                "skipped_duplicate": outcome.skipped_duplicate,
+                "failed": outcome.failed,
+                "expired_pruned": outcome.expired_pruned,
+            }
+        else:
+            push_outcome = {"status": "disabled"}
+    except Exception:
+        logger.exception("push_dispatch_failed_in_weather_ingest")
+        push_outcome = {"status": "error"}
+
     logger.info(
         "weather_ingest_completed",
         extra={
@@ -286,6 +769,8 @@ async def ingest_weather(auth_user: AuthUser = Depends(get_current_user)) -> dic
             "rows": result.rows,
             "source": result.source,
             "requested_by": auth_user.user_id,
+            "water_level_outcome": water_level_ingest_outcome.get("status") if water_level_ingest_outcome else None,
+            "push_outcome": push_outcome,
         },
     )
     return {
@@ -293,6 +778,38 @@ async def ingest_weather(auth_user: AuthUser = Depends(get_current_user)) -> dic
         "rows": result.rows,
         "source": result.source,
         "fetched_at": result.fetched_at,
+        "zones": result.zones,
+        "water_level": water_level_ingest_outcome,
+        "push": push_outcome,
+    }
+
+
+@app.post("/v1/admin/ingest/water-level")
+async def ingest_water_level(auth_user: AuthUser = Depends(get_current_user)) -> dict:
+    result = water_level_ingest_service.ingest()
+    if result.status == "ok":
+        forecast_cache.delete_many(FORECAST_CACHE_KEYS)
+    logger.info(
+        "water_level_ingest_completed",
+        extra={
+            "event_type": "water_level_ingest",
+            "status": result.status,
+            "reason": result.reason,
+            "requested_by": auth_user.user_id,
+        },
+    )
+    return {
+        "status": result.status,
+        "reason": result.reason,
+        "saved": (
+            {
+                "day": str(result.saved.day),
+                "level_m": result.saved.level_m,
+                "source": result.saved.source,
+            }
+            if result.saved
+            else None
+        ),
     }
 
 
@@ -314,11 +831,61 @@ async def weather_dq(auth_user: AuthUser = Depends(get_current_user)) -> dict:
     }
 
 
+@app.post("/v1/admin/water-level", response_model=WaterLevelResponse, status_code=status.HTTP_201_CREATED)
+async def record_water_level(
+    payload: WaterLevelCreate,
+    auth_user: AuthUser = Depends(get_current_user),
+) -> WaterLevelResponse:
+    saved = water_level_repository.upsert(
+        WaterLevelReading(
+            day=payload.day,
+            level_m=payload.level_m,
+            inflow_m3s=payload.inflow_m3s,
+            outflow_m3s=payload.outflow_m3s,
+            source=payload.source,
+            note=payload.note,
+        )
+    )
+    forecast_cache.delete_many(FORECAST_CACHE_KEYS)
+    logger.info(
+        "water_level_recorded",
+        extra={
+            "event_type": "water_level_record",
+            "requested_by": auth_user.user_id,
+            "day": str(saved.day),
+            "level_m": saved.level_m,
+            "source": saved.source,
+        },
+    )
+    assert saved.recorded_at is not None
+    return WaterLevelResponse(
+        day=saved.day,
+        level_m=saved.level_m,
+        inflow_m3s=saved.inflow_m3s,
+        outflow_m3s=saved.outflow_m3s,
+        source=saved.source,
+        note=saved.note,
+        recorded_at=saved.recorded_at,
+    )
+
+
+@app.get("/v1/admin/water-level/latest", response_model=WaterLevelStateResponse)
+async def water_level_latest(auth_user: AuthUser = Depends(get_current_user)) -> WaterLevelStateResponse:
+    state = water_level_service.current_state()
+    return WaterLevelStateResponse(
+        latest_level_m=state.latest_level_m,
+        latest_day=state.latest_day,
+        trend_7d_m=state.trend_7d_m,
+        source=state.source,
+        is_fresh=state.is_fresh,
+    )
+
+
 @app.post("/v1/admin/ml/retrain")
 async def ml_retrain(auth_user: AuthUser = Depends(get_current_user)) -> dict:
     result: RetrainResult = ml_service.retrain()
     if result.status == "ok":
-        forecast_cache.delete_many(["forecast:v1:all", "forecast:v1:pike", "forecast:v1:perch"])
+        forecast_cache.delete_many(FORECAST_CACHE_KEYS)
     logger.info(
         "ml_retrain_finished",
         extra={
@@ -357,7 +924,7 @@ async def ml_active(auth_user: AuthUser = Depends(get_current_user)) -> dict:
 async def ml_publish(model_id: str | None = None, auth_user: AuthUser = Depends(get_current_user)) -> dict:
     result: PublishResult = ml_service.publish_model(model_id=model_id)
     if result.status == "ok":
-        forecast_cache.delete_many(["forecast:v1:all", "forecast:v1:pike", "forecast:v1:perch"])
+        forecast_cache.delete_many(FORECAST_CACHE_KEYS)
     logger.info(
         "ml_publish_finished",
         extra={
