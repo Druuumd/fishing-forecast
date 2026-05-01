@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const inferApiDefault = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL;
@@ -86,6 +86,133 @@ const ZONE_OPTION_GROUPS = [
 
 const ALL_ZONE_VALUES = ZONE_OPTION_GROUPS.flatMap((g) => g.options.map((o) => o.value));
 
+// ---- Leaflet map (lazy CDN load, used by the water-temp tab) ------------
+const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+let _leafletPromise = null;
+function loadLeaflet() {
+  if (typeof window === "undefined") return Promise.reject(new Error("ssr"));
+  if (window.L) return Promise.resolve(window.L);
+  if (_leafletPromise) return _leafletPromise;
+  _leafletPromise = new Promise((resolve, reject) => {
+    if (!document.querySelector(`link[href="${LEAFLET_CSS}"]`)) {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = LEAFLET_CSS;
+      document.head.appendChild(css);
+    }
+    const s = document.createElement("script");
+    s.src = LEAFLET_JS;
+    s.onload = () => resolve(window.L);
+    s.onerror = () => reject(new Error("leaflet load failed"));
+    document.head.appendChild(s);
+  });
+  return _leafletPromise;
+}
+
+// Maps a surface temperature (°C) to a color stop covering the reservoir's
+// realistic seasonal range from late-winter ice-out (≈0–4°C) to peak summer
+// (≈22°C). Returns a hex string usable by both Leaflet and CSS.
+function tempColor(t) {
+  if (t == null || Number.isNaN(t)) return "#94a3b8";
+  if (t < 5) return "#0c4a6e";
+  if (t < 10) return "#0ea5e9";
+  if (t < 15) return "#22d3ee";
+  if (t < 20) return "#84cc16";
+  if (t < 25) return "#fb923c";
+  return "#dc2626";
+}
+
+function WaterTempMap({ zones, points, onPick }) {
+  const mountRef = useRef(null);
+  const mapRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    let layer = null;
+    (async () => {
+      let L;
+      try {
+        L = await loadLeaflet();
+      } catch (e) {
+        if (!cancelled) setError("Не удалось загрузить карту (нет доступа к unpkg.com).");
+        return;
+      }
+      if (cancelled || !mountRef.current) return;
+      if (mapRef.current) {
+        // Already initialised — just refresh markers below.
+      } else {
+        // Krasnoyarsk reservoir centred view; zoom shows the entire stretch.
+        mapRef.current = L.map(mountRef.current).setView([54.7, 91.7], 8);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: '© OpenStreetMap',
+          maxZoom: 18,
+        }).addTo(mapRef.current);
+        if (onPick) {
+          mapRef.current.on("click", (e) => {
+            onPick(Number(e.latlng.lat.toFixed(5)), Number(e.latlng.lng.toFixed(5)));
+          });
+        }
+      }
+      // Build/refresh marker layer.
+      if (mapRef.current._kvhMarkerLayer) {
+        mapRef.current.removeLayer(mapRef.current._kvhMarkerLayer);
+      }
+      layer = L.layerGroup();
+      for (const z of zones || []) {
+        const m = L.circleMarker([z.lat, z.lon], {
+          color: "#94a3b8", radius: 6, weight: 2, fillOpacity: 0.25,
+        });
+        m.bindPopup(`<strong>${z.label}</strong>`);
+        layer.addLayer(m);
+      }
+      for (const p of points || []) {
+        const c = tempColor(p.surface_temp_c);
+        const m = L.circleMarker([p.latitude, p.longitude], {
+          color: c, radius: 8, weight: 2, fillColor: c, fillOpacity: 0.7,
+        });
+        const therm = p.thermocline_depth_m != null
+          ? `<br/>термоклин ${p.thermocline_depth_m}м · ниже ${p.below_thermocline_temp_c}°C`
+          : "";
+        m.bindPopup(
+          `<strong>${p.zone || "?"}</strong><br/>` +
+          `Tw поверхность: <strong>${Number(p.surface_temp_c).toFixed(1)}°C</strong>${therm}<br/>` +
+          `<small>${new Date(p.measured_at).toLocaleString("ru-RU")}</small>`
+        );
+        layer.addLayer(m);
+      }
+      layer.addTo(mapRef.current);
+      mapRef.current._kvhMarkerLayer = layer;
+    })();
+    return () => { cancelled = true; };
+  }, [zones, points, onPick]);
+
+  // Tear down the map only on full unmount.
+  useEffect(() => () => {
+    if (mapRef.current) {
+      try { mapRef.current.remove(); } catch (_) {}
+      mapRef.current = null;
+    }
+  }, []);
+
+  return (
+    <div className="map-leaflet-wrap">
+      {error && <div className="hint">{error}</div>}
+      <div ref={mountRef} className="map-leaflet" />
+      <div className="map-legend">
+        Цвет точки = температура:
+        <span className="map-legend-pill" style={{ background: "#0c4a6e" }}>&lt;5°C</span>
+        <span className="map-legend-pill" style={{ background: "#0ea5e9" }}>5–10</span>
+        <span className="map-legend-pill" style={{ background: "#22d3ee" }}>10–15</span>
+        <span className="map-legend-pill" style={{ background: "#84cc16" }}>15–20</span>
+        <span className="map-legend-pill" style={{ background: "#fb923c" }}>20–25</span>
+        <span className="map-legend-pill" style={{ background: "#dc2626" }}>≥25</span>
+      </div>
+    </div>
+  );
+}
+
 // VAPID public key is base64url; convert to Uint8Array for pushManager.subscribe.
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -120,8 +247,51 @@ const fmtDate = (iso) => {
   return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short", weekday: "short" });
 };
 
+// Friendly date used in card heads: "Сегодня", "Завтра", "Чт 30 апр".
+const fmtDateFriendly = (iso) => {
+  if (!iso) return "—";
+  const target = new Date(`${iso}T12:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const targetDay = new Date(target);
+  targetDay.setHours(0, 0, 0, 0);
+  const days = Math.round((targetDay - today) / 86400000);
+  if (days === 0) return "Сегодня";
+  if (days === 1) return "Завтра";
+  if (days === -1) return "Вчера";
+  return target.toLocaleDateString("ru-RU", { day: "numeric", month: "short", weekday: "short" });
+};
+
 const fmtSigned = (v, digits = 2) =>
   v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(digits)}`;
+
+// Per-score visual classification + headline text. Drives card border,
+// verdict line, and emoji icon in the card head.
+function scoreVerdict(score) {
+  if (score >= 4.3) return { tier: "excellent", label: "Отличный день — пора собираться!", emoji: "🔥" };
+  if (score >= 3.5) return { tier: "good", label: "Хороший день для ловли", emoji: "👍" };
+  if (score >= 2.5) return { tier: "fair", label: "Средний клёв, шансы есть", emoji: "🤔" };
+  if (score >= 1.5) return { tier: "weak", label: "Слабый день, не лучшее время", emoji: "🙁" };
+  return { tier: "bad", label: "Сегодня клёва не ждите", emoji: "🚫" };
+}
+
+// 5 fish silhouettes filled proportionally to score / 5. Inline SVG so
+// no extra image asset needed.
+function ScoreFish({ score }) {
+  const filled = Math.max(0, Math.min(5, score));
+  return (
+    <div className="score-fish" title={`${score.toFixed(2)}/5`}>
+      {[1, 2, 3, 4, 5].map((i) => {
+        const portion = Math.max(0, Math.min(1, filled - (i - 1)));
+        return (
+          <span key={i} className="score-fish-cell" style={{ ["--fill"]: `${portion * 100}%` }}>
+            🐟
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 // ---- Generic SVG line chart ---------------------------------------------
 function LineChart({ data, series, refLines = [], height = 110, fmt = (v) => v.toFixed(1) }) {
@@ -233,33 +403,141 @@ function FactorRow({ f }) {
   );
 }
 
-function ForecastDayCard({ day }) {
-  const hasGate = (day.factors || []).some((f) => f.name.endsWith("_gate"));
-  const hot = day.score >= 3.5;
-  const cold = day.score <= 1.8;
-  const cls = ["day-card", hot ? "hot" : "", cold ? "cold" : "", hasGate ? "gated" : ""].join(" ").trim();
-  const widthPct = Math.max(0, Math.min(100, (day.score / 5) * 100));
+function ForecastDayCard({ day, isToday }) {
+  const factors = day.factors || [];
+  const hasGate = factors.some((f) => f.name.endsWith("_gate"));
+  const verdict = scoreVerdict(day.score);
+  const cls = ["day-card", `day-${verdict.tier}`, hasGate ? "gated" : "", isToday ? "today" : ""].join(" ").trim();
+
+  // Show only impactful factors by default; keep gates always visible
+  // (they're decision-changing) and any factor with |contribution| ≥ 0.15.
+  // The "show all" toggle reveals the rest.
+  const [showAll, setShowAll] = useState(false);
+  const isImportant = (f) => f.name.endsWith("_gate") || Math.abs(f.contribution) >= 0.15;
+  const importantFactors = factors.filter(isImportant);
+  const restFactors = factors.filter((f) => !isImportant(f));
+  const visibleFactors = showAll ? factors : importantFactors;
+
   return (
     <div className={cls}>
       <div className="day-head">
-        <span className="day-date">{fmtDate(day.date)}</span>
-        <span className="day-score">{day.score.toFixed(2)}</span>
+        <div className="day-head-left">
+          <div className="day-date">{fmtDateFriendly(day.date)}</div>
+          <div className="day-verdict">
+            <span className="verdict-emoji">{verdict.emoji}</span>
+            <span>{verdict.label}</span>
+          </div>
+        </div>
+        <div className="day-head-right">
+          <ScoreFish score={day.score} />
+          <div className="day-score-num">
+            {day.score.toFixed(1)}
+            <span className="day-conf">{SPECIES_LABEL[day.species]} · {(day.confidence * 100).toFixed(0)}%</span>
+          </div>
+        </div>
       </div>
-      <div className="score-bar"><span style={{ width: `${widthPct}%` }} /></div>
-      <div className="day-conf">уверенность {(day.confidence * 100).toFixed(0)}% · {SPECIES_LABEL[day.species]}</div>
+
+      <BestHoursStrip day={day} />
+
       <dl className="day-meta">
         <dt>воздух</dt><dd>{day.air_temp_c.toFixed(1)} °C</dd>
         <dt>вода</dt><dd>{day.water_temp_c.toFixed(1)} °C</dd>
-        <dt>P (MSL)</dt><dd>{day.pressure_hpa.toFixed(0)} hPa</dd>
-        <dt>P (surface)</dt><dd>{day.surface_pressure_hpa != null ? `${day.surface_pressure_hpa.toFixed(0)} hPa` : "—"}</dd>
+        <dt>давление</dt><dd>{day.pressure_hpa.toFixed(0)} ↦ {day.surface_pressure_hpa != null ? `${day.surface_pressure_hpa.toFixed(0)}` : "—"} hPa</dd>
         <dt>ΔP/24h</dt><dd>{fmtSigned(day.pressure_trend_24h_hpa, 1)} hPa</dd>
-        <dt>ветер</dt><dd>{day.wind_speed_m_s.toFixed(1)} м/с {Math.round(day.wind_direction_deg)}°</dd>
-        <dt>облачность</dt><dd>{Math.round(day.cloud_cover_pct)}%</dd>
-        <dt>осадки</dt><dd>{day.precipitation_mm.toFixed(1)} мм</dd>
+        <dt>ветер</dt><dd>{day.wind_speed_m_s.toFixed(1)} м/с · {Math.round(day.wind_direction_deg)}°</dd>
+        <dt>облачно</dt><dd>{Math.round(day.cloud_cover_pct)}%</dd>
       </dl>
+
       <ThermoclineBanner day={day} />
+
       <div className="factors">
-        {(day.factors || []).map((f, i) => <FactorRow key={i} f={f} />)}
+        {visibleFactors.map((f, i) => <FactorRow key={i} f={f} />)}
+        {!showAll && restFactors.length > 0 && (
+          <button className="factor-expand" onClick={() => setShowAll(true)}>
+            + ещё {restFactors.length} {restFactors.length === 1 ? "фактор" : "факторов"}
+          </button>
+        )}
+        {showAll && restFactors.length > 0 && (
+          <button className="factor-expand" onClick={() => setShowAll(false)}>
+            свернуть
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- Best fishing hours strip --------------------------------------------
+// Horizontal 24h timeline showing dawn/dusk/lunar peak windows. A
+// current-time marker is drawn only on cards whose date matches today
+// (otherwise the marker would be meaningless or off-strip).
+const KIND_COLOR = {
+  dawn: "#fbbf24",        // yellow morning glow
+  dusk: "#f97316",        // orange evening glow
+  lunar_major: "#a78bfa", // purple lunar
+  lunar_minor: "#818cf8",
+};
+
+function BestHoursStrip({ day }) {
+  const windows = day.best_hours || [];
+  if (windows.length === 0) return null;
+  // The strip spans the day's local 00:00 → 24:00. Map each window's
+  // start/end (UTC datetimes) to fractions of the local day.
+  const dayStart = new Date(`${day.date}T00:00:00`);
+  const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
+  const W = 280, H = 26;
+
+  const toX = (iso) => {
+    const t = new Date(iso).getTime();
+    const frac = Math.max(0, Math.min(1, (t - dayStart.getTime()) / (dayEnd.getTime() - dayStart.getTime())));
+    return frac * W;
+  };
+
+  const today = new Date();
+  const isToday = today.toDateString() === dayStart.toDateString();
+  const nowX = isToday ? toX(today.toISOString()) : null;
+
+  return (
+    <div className="best-hours">
+      <svg viewBox={`0 0 ${W} ${H}`} className="bh-svg" preserveAspectRatio="none">
+        {/* Background day line */}
+        <line x1="0" x2={W} y1={H / 2} y2={H / 2} stroke="#334155" strokeWidth="1" />
+        {/* Hour ticks at 06, 12, 18 */}
+        {[6, 12, 18].map((h) => {
+          const x = (h / 24) * W;
+          return (
+            <g key={h}>
+              <line x1={x} x2={x} y1={H / 2 - 2} y2={H / 2 + 2} stroke="#475569" strokeWidth="1" />
+              <text x={x} y={H - 1} fill="#64748b" fontSize="9" textAnchor="middle">{h}</text>
+            </g>
+          );
+        })}
+        {/* Windows */}
+        {windows.map((w, i) => {
+          const x1 = toX(w.start);
+          const x2 = toX(w.end);
+          const width = Math.max(2, x2 - x1);
+          return (
+            <rect
+              key={i} x={x1} y={3} width={width} height={H / 2 - 4}
+              fill={KIND_COLOR[w.kind] || "#94a3b8"} opacity={0.4 + 0.6 * (w.intensity ?? 1)}
+              rx={2}
+            >
+              <title>{w.label} {new Date(w.start).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}–{new Date(w.end).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</title>
+            </rect>
+          );
+        })}
+        {/* Now marker */}
+        {nowX != null && (
+          <line x1={nowX} x2={nowX} y1={1} y2={H - 4} stroke="#f87171" strokeWidth="1.5" />
+        )}
+      </svg>
+      <div className="bh-legend">
+        {windows.map((w, i) => (
+          <span key={i} className="bh-pill" style={{ background: `${KIND_COLOR[w.kind] || "#94a3b8"}33`, borderColor: KIND_COLOR[w.kind] || "#94a3b8" }}>
+            {w.label}: {new Date(w.start).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}–{new Date(w.end).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -303,6 +581,144 @@ function ThermoclineBanner({ day }) {
         <text x={labelX} y={H - 6} fill="#7dd3fc" fontSize="10">холодный низ</text>
       </svg>
       {day.thermocline_advice && <div className="tc-advice">{day.thermocline_advice}</div>}
+    </div>
+  );
+}
+
+// ---- Loading skeletons ---------------------------------------------------
+// Used while forecast / history data is in flight. Same visual structure
+// as the real card so the layout doesn't jump when content arrives.
+function DayCardSkeleton({ hero = false }) {
+  return (
+    <div className={`day-card skeleton ${hero ? "today" : ""}`}>
+      <div className="day-head">
+        <div className="day-head-left">
+          <div className="sk-line sk-w-40" style={{ height: hero ? 22 : 16 }} />
+          <div className="sk-line sk-w-70" style={{ height: 13, marginTop: 6 }} />
+        </div>
+        <div className="day-head-right">
+          <div className="sk-line sk-w-50" style={{ height: hero ? 22 : 16, width: 90 }} />
+          <div className="sk-line sk-w-30" style={{ height: 13 }} />
+        </div>
+      </div>
+      <div className="sk-block" style={{ height: 28 }} />
+      <div className="sk-meta-grid">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="sk-meta-row">
+            <span className="sk-line sk-w-30" />
+            <span className="sk-line sk-w-50" />
+          </div>
+        ))}
+      </div>
+      <div className="sk-block" style={{ height: 12 }} />
+      <div className="sk-block" style={{ height: 12, width: "70%" }} />
+      <div className="sk-block" style={{ height: 12, width: "85%" }} />
+    </div>
+  );
+}
+
+function ForecastSkeleton() {
+  return (
+    <div className="day-grid">
+      <DayCardSkeleton hero />
+      <DayCardSkeleton />
+      <DayCardSkeleton />
+    </div>
+  );
+}
+
+// ---- History summary: latest vs period-average for each variable -------
+function StatCard({ icon, label, value, avg, delta, deltaSuffix, deltaPrecision = 1, higherIsBetter }) {
+  const eps = deltaPrecision === 0 ? 0.5 : 0.05;
+  const direction = delta > eps ? "up" : delta < -eps ? "down" : "flat";
+  let deltaClass = "neutral";
+  if (higherIsBetter === true) {
+    deltaClass = direction === "up" ? "good" : direction === "down" ? "bad" : "neutral";
+  } else if (higherIsBetter === false) {
+    deltaClass = direction === "up" ? "bad" : direction === "down" ? "good" : "neutral";
+  } else {
+    deltaClass = direction === "flat" ? "neutral" : "info";
+  }
+  const arrow = direction === "up" ? "↑" : direction === "down" ? "↓" : "→";
+  const sign = delta >= 0 ? "+" : "";
+  return (
+    <div className="stat-card">
+      <div className="stat-card-head">
+        <span className="stat-icon">{icon}</span>
+        <span className="stat-label">{label}</span>
+      </div>
+      <div className="stat-value">{value}</div>
+      <div className="stat-footer">
+        <span className="stat-avg">{avg}</span>
+        <span className={`stat-delta stat-delta-${deltaClass}`}>
+          {arrow} {sign}{delta.toFixed(deltaPrecision)}{deltaSuffix}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function HistorySummary({ waterHistory, weatherHistory }) {
+  if (waterHistory.length === 0 && weatherHistory.length === 0) return null;
+  const cards = [];
+
+  if (waterHistory.length > 0) {
+    const last = waterHistory[waterHistory.length - 1].level_m;
+    const avg = waterHistory.reduce((s, p) => s + p.level_m, 0) / waterHistory.length;
+    cards.push({
+      icon: "💧", label: "Уровень воды",
+      value: `${last.toFixed(2)} м`,
+      avg: `средн. ${avg.toFixed(2)} м`,
+      delta: last - avg, deltaSuffix: " м", deltaPrecision: 2,
+      higherIsBetter: null,
+    });
+  }
+  if (weatherHistory.length > 0) {
+    const last = weatherHistory[weatherHistory.length - 1];
+    const avg = (key) => weatherHistory.reduce((s, p) => s + (p[key] || 0), 0) / weatherHistory.length;
+    cards.push({
+      icon: "🌊", label: "Tw воды",
+      value: `${last.water_temp_c.toFixed(1)}°C`,
+      avg: `средн. ${avg("water_temp_c").toFixed(1)}°C`,
+      delta: last.water_temp_c - avg("water_temp_c"), deltaSuffix: "°C",
+      higherIsBetter: null,
+    });
+    cards.push({
+      icon: "🌡", label: "Воздух",
+      value: `${last.air_temp_c.toFixed(1)}°C`,
+      avg: `средн. ${avg("air_temp_c").toFixed(1)}°C`,
+      delta: last.air_temp_c - avg("air_temp_c"), deltaSuffix: "°C",
+      higherIsBetter: null,
+    });
+    cards.push({
+      icon: "📊", label: "Давление",
+      value: `${last.pressure_hpa.toFixed(0)} hPa`,
+      avg: `средн. ${avg("pressure_hpa").toFixed(0)}`,
+      delta: last.pressure_hpa - avg("pressure_hpa"),
+      deltaSuffix: " hPa", deltaPrecision: 0,
+      higherIsBetter: null,
+    });
+    cards.push({
+      icon: "💨", label: "Ветер",
+      value: `${last.wind_speed_m_s.toFixed(1)} м/с`,
+      avg: `средн. ${avg("wind_speed_m_s").toFixed(1)}`,
+      delta: last.wind_speed_m_s - avg("wind_speed_m_s"),
+      deltaSuffix: " м/с",
+      higherIsBetter: false,  // less wind = better for fishing
+    });
+  }
+  return (
+    <div className="history-summary-cards">
+      {cards.map((c, i) => <StatCard key={i} {...c} />)}
+    </div>
+  );
+}
+
+function ChartSkeleton({ label }) {
+  return (
+    <div className="chart-block">
+      {label && <h3>{label}</h3>}
+      <div className="sk-chart" />
     </div>
   );
 }
@@ -443,6 +859,9 @@ function App() {
   const [wtFieldErrors, setWtFieldErrors] = useState({});
   const [wtOut, setWtOut] = useState("");
   const [wtPoints, setWtPoints] = useState([]);
+  const [zoneCenters, setZoneCenters] = useState([]);
+
+  const onMapPick = (lat, lon) => setWtForm((x) => ({ ...x, latitude: lat, longitude: lon }));
 
   const submitWaterTempReading = async () => {
     setWtFieldErrors({});
@@ -478,8 +897,12 @@ function App() {
   };
   const loadWaterTempPoints = async () => {
     try {
-      const r = await request("/v1/water-temp-readings");
-      setWtPoints(r.points || []);
+      const [pointsRes, zonesRes] = await Promise.all([
+        request("/v1/water-temp-readings"),
+        zoneCenters.length === 0 ? request("/v1/zones/centers") : Promise.resolve(null),
+      ]);
+      setWtPoints(pointsRes.points || []);
+      if (zonesRes) setZoneCenters(zonesRes.zones || []);
     } catch (e) {
       setOutput(setWtOut, e.message);
     }
@@ -917,34 +1340,27 @@ function App() {
 
   return (
     <main className="app">
-      <header className="card">
-        <h1>KVH Forecast</h1>
+      <header className="app-header">
+        <h1>🎣 KVH Forecast</h1>
         <p className="muted">Прогноз клёва на Красноярском водохранилище</p>
         {!isOnline && (
           <div className="offline-banner">
             📵 Нет сети. Показан последний загруженный прогноз — данные могут быть устаревшими.
           </div>
         )}
-        <div className="row">
-          <input value={apiBase} onChange={(e) => setApiBase(e.target.value)} />
-          <button onClick={persistBase}>Сохранить URL API</button>
-          <button className="secondary" onClick={async () => setOutput(setReadyOut, await request("/v1/ready"))}>
-            Проверить /ready
-          </button>
-        </div>
-        {readyOut && <pre className="out">{readyOut}</pre>}
       </header>
 
       <section className="card">
         <div className="tabs">
-          {withTab("forecast", "Прогноз")}
-          {withTab("history", "История")}
-          {withTab("catch", "Улов")}
-          {withTab("water_temp", "Замеры воды")}
-          {withTab("push", "Уведомления")}
-          {withTab("dashboard", "Профиль")}
-          {withTab("consent", "Согласия")}
-          {withTab("privacy", "Приватность")}
+          {withTab("forecast", "🎣 Прогноз")}
+          {withTab("history", "📈 История")}
+          {withTab("catch", "🐟 Улов")}
+          {withTab("water_temp", "🌡 Замеры")}
+          {withTab("push", "🔔 Уведомления")}
+          {withTab("dashboard", "👤 Профиль")}
+          {withTab("settings", "⚙️ Настройки")}
+          {withTab("consent", "✅ Согласия")}
+          {withTab("privacy", "🛡 Приватность")}
         </div>
       </section>
 
@@ -978,6 +1394,7 @@ function App() {
             <div className="hint">зона: <strong>{forecastRes.zone_label}</strong></div>
           )}
           {forecastErr && <pre className="out">{forecastErr}</pre>}
+          {forecastLoading && !forecastRes && <ForecastSkeleton />}
           {forecastRes && (
             <>
               <WarningsPanel
@@ -988,7 +1405,7 @@ function App() {
               <WaterBanner res={forecastRes} />
               <div className="day-grid">
                 {forecastRes.days.map((d, i) => (
-                  <ForecastDayCard key={i} day={d} />
+                  <ForecastDayCard key={i} day={d} isToday={i === 0} />
                 ))}
               </div>
             </>
@@ -1010,14 +1427,23 @@ function App() {
             </button>
           </div>
           {historyErr && <pre className="out">{historyErr}</pre>}
-          {historySummary && (
-            <div className="history-summary">
-              <div className="stat"><div className="k">записей</div><div className="v">{historySummary.n}</div></div>
-              <div className="stat"><div className="k">текущий</div><div className="v">{historySummary.last.toFixed(2)} м</div></div>
-              <div className="stat"><div className="k">Δ за период</div><div className="v">{fmtSigned(historySummary.delta, 2)} м</div></div>
-              <div className="stat"><div className="k">мин / макс</div><div className="v">{historySummary.min.toFixed(2)} / {historySummary.max.toFixed(2)}</div></div>
-            </div>
+          {historyLoading && waterHistory.length === 0 && weatherHistory.length === 0 && (
+            <>
+              <div className="history-summary">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="stat skeleton">
+                    <div className="sk-line sk-w-50" />
+                    <div className="sk-line sk-w-70" style={{ height: 16, marginTop: 4 }} />
+                  </div>
+                ))}
+              </div>
+              <ChartSkeleton label="Уровень воды (м)" />
+              <ChartSkeleton label="Температура воды и воздуха (°C)" />
+              <ChartSkeleton label="Давление (hPa)" />
+              <ChartSkeleton label="Ветер (м/с) и осадки (мм)" />
+            </>
           )}
+          <HistorySummary waterHistory={waterHistory} weatherHistory={weatherHistory} />
 
           <div className="chart-block">
             <h3>Уровень воды (м)</h3>
@@ -1171,6 +1597,8 @@ function App() {
               {wtFieldErrors.below_thermocline_temp_c && <div className="field-error">{wtFieldErrors.below_thermocline_temp_c}</div>}
             </label>
           </div>
+          <WaterTempMap zones={zoneCenters} points={wtPoints} onPick={onMapPick} />
+          <div className="hint">Кликните по карте, чтобы подставить координаты.</div>
           <label>
             Прибор / способ
             <input
@@ -1280,54 +1708,57 @@ function App() {
 
                   <h3 style={{ marginTop: 14 }}>Условия</h3>
                   {pushForm.conditions.length === 0 && (
-                    <div className="hint">пока ни одного условия — добавьте хотя бы одно ниже.</div>
+                    <div className="hint">Добавьте хотя бы одно условие — ниже dropdown.</div>
                   )}
-                  <ul className="catch-list">
+                  <div className="condition-chips">
                     {pushForm.conditions.map((c, idx) => {
                       const tdef = pushTypes.find((t) => t.type === c.type);
+                      const params = tdef?.params_schema || [];
                       return (
-                        <li key={idx}>
-                          <div style={{ flex: 1 }}>
-                            <strong>{tdef?.label || c.type}</strong>
-                            {(tdef?.params_schema || []).length > 0 && (
-                              <div className="row" style={{ marginTop: 4 }}>
-                                {tdef.params_schema.map((p) => (
-                                  <label key={p.name}>
-                                    {p.label}
-                                    <input
-                                      type="number"
-                                      min={p.min}
-                                      max={p.max}
-                                      step={p.step}
-                                      value={c.params[p.name] ?? p.default}
-                                      onChange={(e) =>
-                                        updateConditionParam(
-                                          idx,
-                                          p.name,
-                                          p.kind === "integer"
-                                            ? parseInt(e.target.value || "0", 10)
-                                            : Number(e.target.value)
-                                        )
-                                      }
-                                    />
-                                  </label>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                          <button className="danger" onClick={() => removeCondition(idx)}>
-                            Удалить
-                          </button>
-                        </li>
+                        <div key={idx} className="condition-chip">
+                          <button
+                            className="chip-remove"
+                            title="Удалить"
+                            onClick={() => removeCondition(idx)}
+                          >×</button>
+                          <div className="chip-label">{tdef?.label || c.type}</div>
+                          {params.length > 0 && (
+                            <div className="chip-params">
+                              {params.map((p) => (
+                                <label key={p.name} className="chip-param">
+                                  <span>{p.label}</span>
+                                  <input
+                                    type="number"
+                                    min={p.min}
+                                    max={p.max}
+                                    step={p.step}
+                                    value={c.params[p.name] ?? p.default}
+                                    onChange={(e) =>
+                                      updateConditionParam(
+                                        idx,
+                                        p.name,
+                                        p.kind === "integer"
+                                          ? parseInt(e.target.value || "0", 10)
+                                          : Number(e.target.value)
+                                      )
+                                    }
+                                  />
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
-                  </ul>
+                  </div>
 
-                  <div className="row">
+                  <div className="row" style={{ marginTop: 10 }}>
                     <select value={pushNewType} onChange={(e) => setPushNewType(e.target.value)}>
-                      {pushTypes.map((t) => (
-                        <option key={t.type} value={t.type}>{t.label}</option>
-                      ))}
+                      {pushTypes
+                        .filter((t) => !pushForm.conditions.some((c) => c.type === t.type))
+                        .map((t) => (
+                          <option key={t.type} value={t.type}>{t.label}</option>
+                        ))}
                     </select>
                     <button className="secondary" onClick={addCondition}>+ Добавить условие</button>
                   </div>
@@ -1387,9 +1818,43 @@ function App() {
         </section>
       )}
 
+      {activeTab === "settings" && (
+        <section className="card">
+          <h2>⚙️ Настройки</h2>
+          <label>
+            URL API
+            <input value={apiBase} onChange={(e) => setApiBase(e.target.value)} />
+          </label>
+          <div className="row">
+            <button onClick={persistBase}>Сохранить URL API</button>
+            <button
+              className="secondary"
+              onClick={async () => {
+                try {
+                  setOutput(setReadyOut, await request("/v1/ready"));
+                } catch (e) {
+                  setOutput(setReadyOut, e.message);
+                }
+              }}
+            >
+              Проверить /ready
+            </button>
+          </div>
+          <pre className="out">{readyOut}</pre>
+          <div className="hint">
+            Карта: текущий провайдер — <strong>{mapProvider}</strong>.
+          </div>
+          <div className="row">
+            <button className="secondary" onClick={() => setProvider("yandex")}>Yandex Maps</button>
+            <button className="secondary" onClick={() => setProvider("openstreetmap")}>OpenStreetMap</button>
+          </div>
+          <pre className="out">{mapOut}</pre>
+        </section>
+      )}
+
       {activeTab === "dashboard" && (
         <section className="card">
-          <h2>Профиль</h2>
+          <h2>👤 Профиль</h2>
           <div className="row">
             <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" />
             <input
@@ -1409,34 +1874,56 @@ function App() {
 
       {activeTab === "catch" && (
         <section className="card">
-          <h2>Записать улов</h2>
-          <div className="grid">
-            <label>
-              Вид
-              <select
-                value={catchForm.species}
-                onChange={(e) => setCatchForm((x) => ({ ...x, species: e.target.value }))}
+          <h2>🐟 Записать улов</h2>
+          <div className="hint">
+            После отправки модель связывает улов с погодой того дня и
+            использует пары (условия → результат) для retrain.
+            {queue.length > 0 && (
+              <span className="queue-badge">{queue.length} в очереди offline</span>
+            )}
+          </div>
+
+          {/* Species: pill-buttons with fish icons */}
+          <div className="species-pills">
+            {[
+              { value: "pike", label: "Щука", icon: "🐊" },
+              { value: "perch", label: "Окунь", icon: "🐠" },
+              { value: "bream", label: "Лещ", icon: "🐟" },
+            ].map((s) => (
+              <button
+                key={s.value}
+                className={`species-pill ${catchForm.species === s.value ? "active" : ""}`}
+                onClick={() => setCatchForm((x) => ({ ...x, species: s.value }))}
               >
-                <option value="pike">щука</option>
-                <option value="perch">окунь</option>
-                <option value="bream">лещ</option>
-              </select>
-            </label>
-            <label>
-              Оценка (0–5)
-              <input
-                type="number"
-                min="0"
-                max="5"
-                step="0.1"
-                value={catchForm.score}
-                onChange={(e) => setCatchForm((x) => ({ ...x, score: Number(e.target.value) }))}
-              />
-            </label>
+                <span className="species-pill-icon">{s.icon}</span>
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Score: slider + fish visualization */}
+          <label className="score-slider-label">
+            <div className="score-slider-row">
+              <span className="muted">Оценка клёва</span>
+              <span className="score-slider-value">{catchForm.score.toFixed(1)} / 5</span>
+            </div>
+            <input
+              className="score-slider"
+              type="range"
+              min="0"
+              max="5"
+              step="0.1"
+              value={catchForm.score}
+              onChange={(e) => setCatchForm((x) => ({ ...x, score: Number(e.target.value) }))}
+            />
+            <ScoreFish score={catchForm.score} />
+          </label>
+
+          <div className="grid">
             <label>
               Широта
               <input
-                type="number"
+                type="number" step="0.0001"
                 value={catchForm.latitude}
                 onChange={(e) => setCatchForm((x) => ({ ...x, latitude: Number(e.target.value) }))}
               />
@@ -1444,7 +1931,7 @@ function App() {
             <label>
               Долгота
               <input
-                type="number"
+                type="number" step="0.0001"
                 value={catchForm.longitude}
                 onChange={(e) => setCatchForm((x) => ({ ...x, longitude: Number(e.target.value) }))}
               />
@@ -1452,8 +1939,13 @@ function App() {
           </div>
           <label>
             Заметка
-            <input value={catchForm.note} onChange={(e) => setCatchForm((x) => ({ ...x, note: e.target.value }))} />
+            <input
+              placeholder="приманка, время, условия…"
+              value={catchForm.note}
+              onChange={(e) => setCatchForm((x) => ({ ...x, note: e.target.value }))}
+            />
           </label>
+
           <div className="row">
             <button
               onClick={async () => {
@@ -1473,7 +1965,9 @@ function App() {
               Отправить
             </button>
             <button className="secondary" onClick={enqueueCatch}>В очередь (offline)</button>
-            <button className="secondary" onClick={syncQueue}>Sync очередь</button>
+            {queue.length > 0 && (
+              <button className="secondary" onClick={syncQueue}>↻ Sync очередь ({queue.length})</button>
+            )}
           </div>
           <div className="row">
             <button
@@ -1498,11 +1992,10 @@ function App() {
                 );
               }}
             >
-              Где я (GPS)
+              📍 GPS
             </button>
-            <button className="secondary" onClick={() => setProvider("yandex")}>Yandex</button>
-            <button className="secondary" onClick={() => setProvider("openstreetmap")}>OpenStreetMap</button>
           </div>
+
           <iframe
             title="catch-map"
             className="map"
@@ -1515,12 +2008,14 @@ function App() {
               }
             }}
           />
-          {mapLoadError ? (
+          {mapLoadError && (
             <div className="hint">{mapLoadError}. Переключено на доступный провайдер.</div>
-          ) : (
-            <div className="hint">Активный провайдер карты: {mapProvider}.</div>
           )}
-          <pre className="out">{mapOut || catchOut}</pre>
+
+          <details className="debug-fold">
+            <summary>Подробности (debug)</summary>
+            <pre className="out">{mapOut || catchOut}</pre>
+          </details>
         </section>
       )}
 

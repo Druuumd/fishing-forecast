@@ -27,6 +27,8 @@ def make_day(
     daylight_hours=14.0,
     factor_names=frozenset(),
     on_date=None,
+    moon_phase_kind=None,
+    moon_growing=None,
 ):
     return _Day(
         date=on_date or date(2026, 7, 15),
@@ -40,6 +42,8 @@ def make_day(
         pressure_trend_24h_hpa=pressure_trend_24h_hpa,
         daylight_hours=daylight_hours,
         factor_names=set(factor_names),
+        moon_phase_kind=moon_phase_kind,
+        moon_growing=moon_growing,
     )
 
 
@@ -54,6 +58,7 @@ EXPECTED_CONDITION_TYPES = {
     "no_severe_weather", "no_precipitation", "water_temp_min",
     "water_temp_max", "pressure_stable", "cloud_max", "daylight_min",
     "lookahead_max_days", "weekend_only",
+    "moon_growing", "moon_phase_in",
 }
 
 
@@ -207,3 +212,36 @@ def test_describe_conditions_joins_with_semicolons():
 def test_describe_conditions_unknown_type_marked():
     text = describe_conditions([{"type": "totally_made_up", "params": {}}])
     assert "?" in text  # graceful: shows ?type instead of crashing
+
+
+# -- Moon-phase conditions ---------------------------------------------
+
+
+def test_moon_growing_default_matches_waxing():
+    e = CONDITION_REGISTRY["moon_growing"]
+    assert e.matches(make_day(moon_growing=True), {}, today=TODAY)
+    assert not e.matches(make_day(moon_growing=False), {}, today=TODAY)
+
+
+def test_moon_growing_inverse():
+    e = CONDITION_REGISTRY["moon_growing"]
+    assert e.matches(make_day(moon_growing=False), {"growing": False}, today=TODAY)
+    assert not e.matches(make_day(moon_growing=True), {"growing": False}, today=TODAY)
+
+
+def test_moon_phase_in_matches_listed():
+    e = CONDITION_REGISTRY["moon_phase_in"]
+    assert e.matches(make_day(moon_phase_kind="full"), {"kinds": ["full", "new"]}, today=TODAY)
+    assert e.matches(make_day(moon_phase_kind="new"), {"kinds": ["full", "new"]}, today=TODAY)
+    assert not e.matches(make_day(moon_phase_kind="first_quarter"), {"kinds": ["full", "new"]}, today=TODAY)
+
+
+def test_moon_phase_in_accepts_string_param():
+    """Some clients send a single value instead of a list."""
+    e = CONDITION_REGISTRY["moon_phase_in"]
+    assert e.matches(make_day(moon_phase_kind="full"), {"kinds": "full"}, today=TODAY)
+
+
+def test_moon_phase_in_empty_list_never_matches():
+    e = CONDITION_REGISTRY["moon_phase_in"]
+    assert not e.matches(make_day(moon_phase_kind="full"), {"kinds": []}, today=TODAY)

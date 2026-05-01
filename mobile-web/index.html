@@ -10,34 +10,40 @@
 </head>
 <body>
   <main class="app">
-    <header class="card">
-      <h1>KVH Forecast</h1>
+    <header class="app-header">
+      <h1>🎣 KVH Forecast</h1>
       <p class="muted">Прогноз клёва · Красноярское водохранилище</p>
       <div id="offlineBanner" class="offline-banner" hidden>
         📵 Нет сети. Показан последний загруженный прогноз — данные могут быть устаревшими.
       </div>
+    </header>
+
+    <section class="card">
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-tab="forecast">🎣 Прогноз</button>
+        <button class="tab" data-tab="history">📈 История</button>
+        <button class="tab" data-tab="catch">🐟 Улов</button>
+        <button class="tab" data-tab="water_temp">🌡 Замеры</button>
+        <button class="tab" data-tab="push">🔔 Уведомления</button>
+        <button class="tab" data-tab="profile">👤 Профиль</button>
+        <button class="tab" data-tab="settings">⚙️ Настройки</button>
+        <button class="tab" data-tab="consent">✅ Согласия</button>
+        <button class="tab" data-tab="privacy">🛡 Приватность</button>
+      </div>
+    </section>
+
+    <!-- Settings tab (API URL + ready check, moved from header) -->
+    <section class="card tab-pane" data-pane="settings" hidden>
+      <h2>⚙️ Настройки</h2>
       <label class="field">
         <span>API URL</span>
         <input id="baseUrl" placeholder="https://kvh-forecast.ru" />
       </label>
       <div class="row">
         <button id="btnSaveBase">Сохранить</button>
-        <button id="btnCheckReady" class="secondary">Проверить</button>
+        <button id="btnCheckReady" class="secondary">Проверить /ready</button>
       </div>
       <pre id="readyOut" class="out" hidden></pre>
-    </header>
-
-    <section class="card">
-      <div class="tabs" id="tabs">
-        <button class="tab active" data-tab="forecast">Прогноз</button>
-        <button class="tab" data-tab="history">История</button>
-        <button class="tab" data-tab="catch">Улов</button>
-        <button class="tab" data-tab="water_temp">Замеры воды</button>
-        <button class="tab" data-tab="push">Уведомления</button>
-        <button class="tab" data-tab="profile">Профиль</button>
-        <button class="tab" data-tab="consent">Согласия</button>
-        <button class="tab" data-tab="privacy">Приватность</button>
-      </div>
     </section>
 
     <!-- Forecast tab -->
@@ -116,48 +122,67 @@
 
     <!-- Catch tab -->
     <section class="card tab-pane" data-pane="catch" hidden>
-      <h2>Записать улов</h2>
-      <div class="row">
-        <label class="field">
-          <span>Вид</span>
-          <select id="catchSpecies">
-            <option value="pike">щука</option>
-            <option value="perch" selected>окунь</option>
-            <option value="bream">лещ</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Оценка</span>
-          <input id="catchScore" type="number" min="0" max="5" step="0.1" value="4.1" />
-        </label>
+      <h2>🐟 Записать улов</h2>
+      <p class="hint">
+        После отправки модель связывает улов с погодой того дня и
+        использует пары (условия → результат) для retrain.
+        <span id="catchQueueBadge" hidden class="queue-badge"></span>
+      </p>
+
+      <!-- Species: pill buttons -->
+      <div class="species-pills" id="catchSpeciesPills">
+        <button class="species-pill" data-species="pike" type="button">
+          <span class="species-pill-icon">🐊</span><span>Щука</span>
+        </button>
+        <button class="species-pill active" data-species="perch" type="button">
+          <span class="species-pill-icon">🐠</span><span>Окунь</span>
+        </button>
+        <button class="species-pill" data-species="bream" type="button">
+          <span class="species-pill-icon">🐟</span><span>Лещ</span>
+        </button>
       </div>
+      <input id="catchSpecies" type="hidden" value="perch" />
+
+      <!-- Score: slider with fish visualisation -->
+      <label class="score-slider-label">
+        <div class="score-slider-row">
+          <span class="muted">Оценка клёва</span>
+          <span class="score-slider-value" id="catchScoreValue">4.1 / 5</span>
+        </div>
+        <input class="score-slider" id="catchScore" type="range" min="0" max="5" step="0.1" value="4.1" />
+        <div id="catchScoreFish" class="score-fish"></div>
+      </label>
+
       <div class="row">
         <label class="field">
           <span>Широта</span>
-          <input id="catchLat" type="number" step="0.0001" value="55.99" />
+          <input id="catchLat" type="number" step="0.0001" value="55.0" />
         </label>
         <label class="field">
           <span>Долгота</span>
-          <input id="catchLon" type="number" step="0.0001" value="92.88" />
+          <input id="catchLon" type="number" step="0.0001" value="91.7" />
         </label>
       </div>
       <label class="field">
         <span>Заметка</span>
-        <input id="catchNote" value="mobile" />
+        <input id="catchNote" placeholder="приманка, время, условия…" />
       </label>
       <div class="row full">
         <button id="btnCatch">Отправить</button>
       </div>
       <div class="row">
         <button id="btnQueueCatch" class="secondary">В очередь</button>
-        <button id="btnSyncQueue" class="secondary">Sync</button>
+        <button id="btnSyncQueue" class="secondary" hidden>↻ Sync очередь</button>
       </div>
       <div class="row full">
-        <button id="btnUseCurrentLocation" class="secondary">📍 Где я (GPS)</button>
+        <button id="btnUseCurrentLocation" class="secondary">📍 GPS</button>
       </div>
       <iframe id="mapFrame" class="map" title="Map"></iframe>
-      <pre id="catchOut" class="out" hidden></pre>
-      <pre id="mapOut" class="out" hidden></pre>
+      <details class="debug-fold">
+        <summary>Подробности (debug)</summary>
+        <pre id="catchOut" class="out" hidden></pre>
+        <pre id="mapOut" class="out" hidden></pre>
+      </details>
     </section>
 
     <!-- User-submitted water-temperature readings -->
@@ -213,6 +238,17 @@
       <div class="row full">
         <button id="btnWtRefresh" class="secondary">Обновить список</button>
       </div>
+      <div id="wtMap" class="map-leaflet"></div>
+      <div class="hint">Кликните по карте, чтобы подставить координаты.</div>
+      <div class="map-legend">
+        Цвет точки = Tw:
+        <span class="map-legend-pill" style="background:#0c4a6e">&lt;5°C</span>
+        <span class="map-legend-pill" style="background:#0ea5e9">5–10</span>
+        <span class="map-legend-pill" style="background:#22d3ee">10–15</span>
+        <span class="map-legend-pill" style="background:#84cc16">15–20</span>
+        <span class="map-legend-pill" style="background:#fb923c">20–25</span>
+        <span class="map-legend-pill" style="background:#dc2626">≥25</span>
+      </div>
       <pre id="wtOut" class="out" hidden></pre>
       <h3>Недавние замеры (всех)</h3>
       <ul id="wtList" class="list"></ul>
@@ -248,7 +284,7 @@
           </label>
         </div>
         <h3>Условия</h3>
-        <ul id="pushConditions" class="list"></ul>
+        <div id="pushConditions"></div>
         <div class="row">
           <select id="pushNewType"></select>
           <button id="btnAddCondition" class="secondary">+ Добавить</button>

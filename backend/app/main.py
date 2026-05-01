@@ -32,6 +32,8 @@ from app.schemas import (
     WaterTempReadingCreate,
     WaterTempReadingRecord,
     WaterTempReadingsResponse,
+    ZoneCenter,
+    ZoneCentersResponse,
     WaterLevelCreate,
     WaterLevelHistoryPoint,
     WaterLevelHistoryResponse,
@@ -95,6 +97,8 @@ forecast_service = ForecastService(
     historical_snapshot_loader=_load_historical_snapshots,
     region=settings.forecast_region,
     region_elevation_m=settings.forecast_region_elevation_m,
+    location_lat=settings.location_lat,
+    location_lon=settings.location_lon,
 )
 weather_ingest_service = WeatherIngestService(settings, weather_repository)
 weather_quality_service = WeatherQualityService(settings, weather_repository)
@@ -366,6 +370,32 @@ async def get_forecast(
     return response
 
 
+@app.get("/v1/zones/centers", response_model=ZoneCentersResponse)
+async def zone_centers() -> ZoneCentersResponse:
+    """Public read: coordinates + label + archetype for the 13 named bays.
+
+    Used by the frontend map to drop bay markers and by any client that
+    wants to position a layer over the reservoir without duplicating the
+    BAY_CENTERS constant.
+    """
+    from app.forecast_service import _BAY_REGISTRY
+    from app.weather_ingest import BAY_CENTERS
+
+    items: list[ZoneCenter] = []
+    for code, (lat, lon) in BAY_CENTERS.items():
+        profile = _BAY_REGISTRY.get(code)
+        if profile is None:
+            continue
+        items.append(ZoneCenter(
+            code=code,
+            label=profile["label"],
+            lat=lat,
+            lon=lon,
+            archetype=profile.get("archetype"),
+        ))
+    return ZoneCentersResponse(zones=items)
+
+
 @app.post(
     "/v1/water-temp-readings",
     response_model=WaterTempReadingRecord,
@@ -601,6 +631,17 @@ async def push_condition_types() -> PushConditionTypesResponse:
             params_schema=[{"name": "days", "kind": "integer", "min": 1, "max": 7, "step": 1, "default": 3, "label": "не дальше чем"}],
         ),
         PushConditionTypeInfo(type="weekend_only", label="Только в выходные"),
+        PushConditionTypeInfo(
+            type="moon_growing", label="Только растущая луна",
+            params_schema=[{"name": "growing", "kind": "boolean", "default": True, "label": "растущая (true) / убывающая (false)"}],
+        ),
+        PushConditionTypeInfo(
+            type="moon_phase_in", label="Фаза луны",
+            params_schema=[{"name": "kinds", "kind": "multiselect", "default": "full",
+                "label": "включает фазы",
+                "options": ["new", "waxing_crescent", "first_quarter", "waxing_gibbous",
+                            "full", "waning_gibbous", "last_quarter", "waning_crescent"]}],
+        ),
     ]
     return PushConditionTypesResponse(types=types)
 

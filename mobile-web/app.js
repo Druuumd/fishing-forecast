@@ -22,22 +22,71 @@
 
   const SPECIES_LABEL = { pike: "щука", perch: "окунь", bream: "лещ" };
 
-  const ZONE_OPTIONS = [
-    { value: "", label: "вся акватория" },
-    { value: "syda", label: "Сыдинский (южный, мелководный)" },
-    { value: "ubey", label: "Убейский (мелкий, тёплый)" },
-    { value: "karasug", label: "Карасугский (нерестовый)" },
-    { value: "yezagash", label: "Езагашский (заболоченный)" },
-    { value: "anash", label: "Анашский (узкий, тёплый)" },
-    { value: "koma", label: "Комский (узкий)" },
-    { value: "ogur", label: "Огурский (центральный)" },
-    { value: "izhul", label: "Ижульский (центральный)" },
-    { value: "derbino", label: "Дербинский (центральный)" },
-    { value: "sisim", label: "Сисимский (крутые берега)" },
-    { value: "biryusa", label: "Бирюсинский (СВ)" },
-    { value: "tubinsky", label: "Тубинский (глубокий)" },
-    { value: "main_channel", label: "Главное русло (открытое)" },
+  // Bays grouped by thermal/depth archetype. Mirrors web/ ZONE_OPTION_GROUPS
+  // so the user picks by fishing intent ("warm shallow spawning bay" /
+  // "deep cool trolling water") rather than memorising 13 names.
+  const ZONE_GROUPS = [
+    { label: "—", options: [{ value: "", label: "вся акватория" }] },
+    {
+      label: "Мелководные тёплые (нерест, лещ, прибрежный)",
+      options: [
+        { value: "syda", label: "Сыдинский (р. Сыда)" },
+        { value: "ubey", label: "Убейский (р. Убей)" },
+        { value: "karasug", label: "Карасугский (р. Карасуг)" },
+        { value: "yezagash", label: "Езагашский (р. Езагаш, заболоченный)" },
+      ],
+    },
+    {
+      label: "Узкие мелкие (рыбалка)",
+      options: [
+        { value: "anash", label: "Анашский (р. Анаша)" },
+        { value: "koma", label: "Комский (р. Кома)" },
+      ],
+    },
+    {
+      label: "Средняя глубина (универсальные)",
+      options: [
+        { value: "ogur", label: "Огурский (р. Огур)" },
+        { value: "izhul", label: "Ижульский (р. Ижуль)" },
+        { value: "derbino", label: "Дербинский (р. Дербина)" },
+      ],
+    },
+    {
+      label: "Глубокие прохладные (щука/окунь, троллинг)",
+      options: [
+        { value: "sisim", label: "Сисимский (р. Сисим)" },
+        { value: "biryusa", label: "Бирюсинский (р. Бирюса)" },
+        { value: "tubinsky", label: "Тубинский (р. Туба)" },
+      ],
+    },
+    {
+      label: "Открытая вода",
+      options: [{ value: "main_channel", label: "Главное русло" }],
+    },
   ];
+  const ALL_ZONE_VALUES = ZONE_GROUPS.flatMap((g) => g.options.map((o) => o.value));
+
+  // Populates a <select> with grouped zones via <optgroup>. The
+  // first "—" group with a single empty value renders as a plain
+  // option (no group label) so the dropdown looks natural.
+  function populateZoneSelect(sel) {
+    sel.innerHTML = "";
+    for (const group of ZONE_GROUPS) {
+      if (group.options.length === 1 && !group.options[0].value) {
+        sel.append(el("option", { value: "", text: group.options[0].label }));
+        continue;
+      }
+      const og = document.createElement("optgroup");
+      og.label = group.label;
+      for (const opt of group.options) {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label;
+        og.append(o);
+      }
+      sel.append(og);
+    }
+  }
 
   function inferDefaultBaseUrl() {
     if (typeof window === "undefined") return "https://kvh-forecast.ru";
@@ -78,6 +127,10 @@
     online: typeof navigator === "undefined" ? true : navigator.onLine,
     warnings: [],
     warningsDismissed: {}, // populated in init() to use loadDismissedWarnings()
+    zoneCenters: [],
+    wtPoints: [],
+    wtMap: null,
+    wtMarkerLayer: null,
   };
 
   // ---- DOM helpers -----------------------------------------------------
@@ -124,6 +177,39 @@
     return node;
   };
 
+  // Lazy-load Leaflet from CDN; resolves to window.L. Cached promise so
+  // multiple tab opens don't spawn duplicate <script> tags.
+  const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+  const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+  let _leafletPromise = null;
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve(window.L);
+    if (_leafletPromise) return _leafletPromise;
+    _leafletPromise = new Promise((resolve, reject) => {
+      if (!document.querySelector(`link[href="${LEAFLET_CSS}"]`)) {
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = LEAFLET_CSS;
+        document.head.appendChild(css);
+      }
+      const s = document.createElement("script");
+      s.src = LEAFLET_JS;
+      s.onload = () => resolve(window.L);
+      s.onerror = () => reject(new Error("leaflet load failed"));
+      document.head.appendChild(s);
+    });
+    return _leafletPromise;
+  }
+  function tempColor(t) {
+    if (t == null || Number.isNaN(t)) return "#94a3b8";
+    if (t < 5) return "#0c4a6e";
+    if (t < 10) return "#0ea5e9";
+    if (t < 15) return "#22d3ee";
+    if (t < 20) return "#84cc16";
+    if (t < 25) return "#fb923c";
+    return "#dc2626";
+  }
+
   const showOut = (id, value) => {
     const node = $(id);
     if (!node) return;
@@ -136,6 +222,86 @@
     const d = new Date(iso);
     return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short", weekday: "short" });
   };
+  const fmtDateFriendly = (iso) => {
+    if (!iso) return "—";
+    const target = new Date(`${iso}T12:00:00`);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const t = new Date(target); t.setHours(0, 0, 0, 0);
+    const days = Math.round((t - today) / 86400000);
+    if (days === 0) return "Сегодня";
+    if (days === 1) return "Завтра";
+    if (days === -1) return "Вчера";
+    return target.toLocaleDateString("ru-RU", { day: "numeric", month: "short", weekday: "short" });
+  };
+  function scoreVerdict(score) {
+    if (score >= 4.3) return { tier: "excellent", label: "Отличный день — пора собираться!", emoji: "🔥" };
+    if (score >= 3.5) return { tier: "good", label: "Хороший день для ловли", emoji: "👍" };
+    if (score >= 2.5) return { tier: "fair", label: "Средний клёв, шансы есть", emoji: "🤔" };
+    if (score >= 1.5) return { tier: "weak", label: "Слабый день, не лучшее время", emoji: "🙁" };
+    return { tier: "bad", label: "Сегодня клёва не ждите", emoji: "🚫" };
+  }
+  // ---- Loading skeletons (mirrors web/ DayCardSkeleton + ChartSkeleton)
+  function renderDayCardSkeleton(hero) {
+    const cls = ["day-card", "skeleton"];
+    if (hero) cls.push("today");
+    const headLeft = el("div", { class: "day-head-left" },
+      el("div", { class: "sk-line sk-w-40", style: `height:${hero ? 22 : 16}px` }),
+      el("div", { class: "sk-line sk-w-70", style: "height:13px;margin-top:6px" }),
+    );
+    const headRight = el("div", { class: "day-head-right" },
+      el("div", { class: "sk-line sk-w-50", style: `height:${hero ? 22 : 16}px;width:90px` }),
+      el("div", { class: "sk-line sk-w-30", style: "height:13px" }),
+    );
+    const meta = el("div", { class: "sk-meta-grid" });
+    for (let i = 0; i < 6; i++) {
+      meta.append(el("div", { class: "sk-meta-row" },
+        el("span", { class: "sk-line sk-w-30" }),
+        el("span", { class: "sk-line sk-w-50" }),
+      ));
+    }
+    return el("div", { class: cls.join(" ") },
+      el("div", { class: "day-head" }, headLeft, headRight),
+      el("div", { class: "sk-block", style: "height:28px" }),
+      meta,
+      el("div", { class: "sk-block", style: "height:12px" }),
+      el("div", { class: "sk-block", style: "height:12px;width:70%" }),
+      el("div", { class: "sk-block", style: "height:12px;width:85%" }),
+    );
+  }
+  function renderForecastSkeleton(host) {
+    host.innerHTML = "";
+    host.append(renderDayCardSkeleton(true));
+    host.append(renderDayCardSkeleton(false));
+    host.append(renderDayCardSkeleton(false));
+  }
+  function renderHistorySkeleton(host) {
+    host.innerHTML = "";
+    const summary = el("div", { class: "history-summary" });
+    for (let i = 0; i < 4; i++) {
+      summary.append(el("div", { class: "stat skeleton" },
+        el("div", { class: "sk-line sk-w-50" }),
+        el("div", { class: "sk-line sk-w-70", style: "height:16px;margin-top:4px" }),
+      ));
+    }
+    host.append(summary);
+    for (const label of ["Уровень воды (м)", "Температура воды и воздуха (°C)", "Давление (hPa)", "Ветер (м/с) и осадки (мм)"]) {
+      host.append(el("div", { class: "chart-block" },
+        el("h3", { text: label }),
+        el("div", { class: "sk-chart" }),
+      ));
+    }
+  }
+
+  function renderScoreFish(score) {
+    const wrap = el("div", { class: "score-fish", title: `${score.toFixed(2)}/5` });
+    const filled = Math.max(0, Math.min(5, score));
+    for (let i = 1; i <= 5; i++) {
+      const portion = Math.max(0, Math.min(1, filled - (i - 1)));
+      const cell = el("span", { class: "score-fish-cell", style: `--fill:${portion * 100}%` }, "🐟");
+      wrap.append(cell);
+    }
+    return wrap;
+  }
   const fmtSigned = (v, digits = 2) =>
     v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(digits)}`;
 
@@ -237,29 +403,96 @@
 
   async function loadWaterTempPoints() {
     try {
-      const r = await api("/v1/water-temp-readings");
+      const [pointsRes, zonesRes] = await Promise.all([
+        api("/v1/water-temp-readings"),
+        state.zoneCenters && state.zoneCenters.length
+          ? Promise.resolve({ zones: state.zoneCenters })
+          : api("/v1/zones/centers"),
+      ]);
+      state.zoneCenters = zonesRes.zones || state.zoneCenters || [];
+      state.wtPoints = pointsRes.points || [];
+
+      // List
       const list = $("wtList");
       list.innerHTML = "";
-      if (!r.points || r.points.length === 0) {
+      if (state.wtPoints.length === 0) {
         list.append(el("li", { class: "hint", text: "пока нет замеров" }));
-        return;
+      } else {
+        for (const p of state.wtPoints) {
+          const therm = p.thermocline_depth_m != null
+            ? ` · термоклин ${p.thermocline_depth_m}м · ниже ${p.below_thermocline_temp_c}°C`
+            : "";
+          const main = el("div", null,
+            el("strong", { text: p.zone || "?" }),
+            ` · поверхность `,
+            el("strong", { text: `${p.surface_temp_c.toFixed(1)}°C` }),
+            therm,
+            el("div", { class: "meta", text: `${fmtDate(p.measured_at)} · ${p.latitude.toFixed(3)},${p.longitude.toFixed(3)}${p.instrument ? ` · ${p.instrument}` : ""}` }),
+          );
+          list.append(el("li", null, main));
+        }
       }
-      for (const p of r.points) {
-        const therm = p.thermocline_depth_m != null
-          ? ` · термоклин ${p.thermocline_depth_m}м · ниже ${p.below_thermocline_temp_c}°C`
-          : "";
-        const main = el("div", null,
-          el("strong", { text: p.zone || "?" }),
-          ` · поверхность `,
-          el("strong", { text: `${p.surface_temp_c.toFixed(1)}°C` }),
-          therm,
-          el("div", { class: "meta", text: `${fmtDate(p.measured_at)} · ${p.latitude.toFixed(3)},${p.longitude.toFixed(3)}${p.instrument ? ` · ${p.instrument}` : ""}` }),
-        );
-        list.append(el("li", null, main));
-      }
+      // Map
+      await renderWaterTempMap();
     } catch (e) {
       showOut("wtOut", e.message);
     }
+  }
+
+  // Initialise (or refresh) the Leaflet map inside #wtMap. Markers come
+  // from state.zoneCenters (gray) and state.wtPoints (color by Tw).
+  async function renderWaterTempMap() {
+    const mount = $("wtMap");
+    if (!mount) return;
+    let L;
+    try {
+      L = await loadLeaflet();
+    } catch (_) {
+      mount.textContent = "Не удалось загрузить карту (нет доступа к unpkg.com).";
+      return;
+    }
+    if (!state.wtMap) {
+      state.wtMap = L.map(mount).setView([54.7, 91.7], 8);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap",
+        maxZoom: 18,
+      }).addTo(state.wtMap);
+      state.wtMap.on("click", (e) => {
+        const lat = Number(e.latlng.lat.toFixed(5));
+        const lon = Number(e.latlng.lng.toFixed(5));
+        $("wtLat").value = String(lat);
+        $("wtLon").value = String(lon);
+      });
+    } else {
+      // Tab may have been hidden; tell Leaflet to recompute its size.
+      setTimeout(() => state.wtMap.invalidateSize(), 50);
+    }
+    if (state.wtMarkerLayer) state.wtMap.removeLayer(state.wtMarkerLayer);
+    const layer = L.layerGroup();
+    for (const z of state.zoneCenters || []) {
+      const m = L.circleMarker([z.lat, z.lon], {
+        color: "#94a3b8", radius: 6, weight: 2, fillOpacity: 0.25,
+      });
+      m.bindPopup(`<strong>${z.label}</strong>`);
+      layer.addLayer(m);
+    }
+    for (const p of state.wtPoints || []) {
+      const c = tempColor(p.surface_temp_c);
+      const m = L.circleMarker([p.latitude, p.longitude], {
+        color: c, radius: 8, weight: 2, fillColor: c, fillOpacity: 0.7,
+      });
+      const therm = p.thermocline_depth_m != null
+        ? `<br/>термоклин ${p.thermocline_depth_m}м · ниже ${p.below_thermocline_temp_c}°C`
+        : "";
+      m.bindPopup(
+        `<strong>${p.zone || "?"}</strong><br/>` +
+        `Tw поверхность: <strong>${Number(p.surface_temp_c).toFixed(1)}°C</strong>${therm}<br/>` +
+        `<small>${new Date(p.measured_at).toLocaleString("ru-RU")}</small>`
+      );
+      layer.addLayer(m);
+    }
+    layer.addTo(state.wtMap);
+    state.wtMarkerLayer = layer;
   }
 
   function useGeoForWaterTemp() {
@@ -285,6 +518,12 @@
     if (state.zone) params.set("zone", state.zone);
     const wParams = new URLSearchParams();
     if (state.zone) wParams.set("zone", state.zone);
+    // Show skeleton placeholders while we wait, but only on the very
+    // first load — subsequent refreshes keep the previous data visible
+    // to avoid flicker (stale-while-revalidate pattern).
+    if (!state.forecastRes) {
+      renderForecastSkeleton($("forecastDays"));
+    }
     try {
       // Forecast + warnings in parallel — warnings are a soft addition,
       // never block the forecast on their failure.
@@ -385,55 +624,147 @@
     // Day cards
     const grid = $("forecastDays");
     grid.innerHTML = "";
-    for (const d of r.days) {
-      grid.append(renderDayCard(d));
-    }
+    r.days.forEach((d, i) => grid.append(renderDayCard(d, i === 0)));
     hide("forecastOut");
   }
 
-  function renderDayCard(d) {
-    const hasGate = (d.factors || []).some((f) => f.name.endsWith("_gate"));
-    const cls = ["day-card"];
-    if (d.score >= 3.5) cls.push("hot");
-    if (d.score <= 1.8) cls.push("cold");
+  function renderDayCard(d, isToday) {
+    const factors = d.factors || [];
+    const hasGate = factors.some((f) => f.name.endsWith("_gate"));
+    const verdict = scoreVerdict(d.score);
+    const cls = ["day-card", `day-${verdict.tier}`];
     if (hasGate) cls.push("gated");
-    const widthPct = Math.max(0, Math.min(100, (d.score / 5) * 100));
+    if (isToday) cls.push("today");
 
     const dlMeta = el("dl", { class: "day-meta" });
     const addMeta = (k, v) => { dlMeta.append(el("dt", { text: k }), el("dd", { text: v })); };
     addMeta("воздух", `${d.air_temp_c.toFixed(1)} °C`);
     addMeta("вода", `${d.water_temp_c.toFixed(1)} °C`);
-    addMeta("P (MSL)", `${d.pressure_hpa.toFixed(0)} hPa`);
-    addMeta("P (surface)", d.surface_pressure_hpa != null ? `${d.surface_pressure_hpa.toFixed(0)} hPa` : "—");
+    addMeta("давление", `${d.pressure_hpa.toFixed(0)} ↦ ${d.surface_pressure_hpa != null ? d.surface_pressure_hpa.toFixed(0) : "—"} hPa`);
     addMeta("ΔP/24h", `${fmtSigned(d.pressure_trend_24h_hpa, 1)} hPa`);
-    addMeta("ветер", `${d.wind_speed_m_s.toFixed(1)} м/с ${Math.round(d.wind_direction_deg)}°`);
-    addMeta("облачность", `${Math.round(d.cloud_cover_pct)}%`);
-    addMeta("осадки", `${d.precipitation_mm.toFixed(1)} мм`);
+    addMeta("ветер", `${d.wind_speed_m_s.toFixed(1)} м/с · ${Math.round(d.wind_direction_deg)}°`);
+    addMeta("облачно", `${Math.round(d.cloud_cover_pct)}%`);
 
+    // Collapsible factor list — only show high-impact + gates by default.
+    const isImportant = (f) => f.name.endsWith("_gate") || Math.abs(f.contribution) >= 0.15;
+    const importantFactors = factors.filter(isImportant);
+    const restFactors = factors.filter((f) => !isImportant(f));
     const factorsBox = el("div", { class: "factors" });
-    for (const f of d.factors || []) {
-      const isGate = f.name.endsWith("_gate");
-      const sign = f.contribution > 0 ? "pos" : f.contribution < 0 ? "neg" : "";
-      factorsBox.append(
-        el("div", { class: `factor ${isGate ? "gate" : ""}` },
-          el("span", { class: "name", text: f.name }),
-          el("span", { class: `value ${sign}`, text: fmtSigned(f.contribution, 2) }),
-          f.detail ? el("span", { class: "detail", text: f.detail }) : null,
-        )
-      );
+    let expanded = false;
+    function repaintFactors() {
+      factorsBox.innerHTML = "";
+      const visible = expanded ? factors : importantFactors;
+      for (const f of visible) {
+        const isGate = f.name.endsWith("_gate");
+        const sign = f.contribution > 0 ? "pos" : f.contribution < 0 ? "neg" : "";
+        factorsBox.append(
+          el("div", { class: `factor ${isGate ? "gate" : ""}` },
+            el("span", { class: "name", text: f.name }),
+            el("span", { class: `value ${sign}`, text: fmtSigned(f.contribution, 2) }),
+            f.detail ? el("span", { class: "detail", text: f.detail }) : null,
+          )
+        );
+      }
+      if (restFactors.length > 0) {
+        const btn = el("button", { class: "factor-expand" },
+          expanded ? "свернуть" : `+ ещё ${restFactors.length} ${restFactors.length === 1 ? "фактор" : "факторов"}`);
+        btn.addEventListener("click", () => { expanded = !expanded; repaintFactors(); });
+        factorsBox.append(btn);
+      }
     }
+    repaintFactors();
+
+    const head = el("div", { class: "day-head" },
+      el("div", { class: "day-head-left" },
+        el("div", { class: "day-date", text: fmtDateFriendly(d.date) }),
+        el("div", { class: "day-verdict" },
+          el("span", { class: "verdict-emoji", text: verdict.emoji }),
+          el("span", { text: verdict.label }))),
+      el("div", { class: "day-head-right" },
+        renderScoreFish(d.score),
+        el("div", { class: "day-score-num" },
+          d.score.toFixed(1),
+          el("span", { class: "day-conf",
+            text: `${SPECIES_LABEL[d.species] || d.species} · ${(d.confidence * 100).toFixed(0)}%` }))),
+    );
 
     return el("div", { class: cls.join(" ") },
-      el("div", { class: "day-head" },
-        el("span", { class: "day-date", text: fmtDate(d.date) }),
-        el("span", { class: "day-score", text: d.score.toFixed(2) })),
-      el("div", { class: "score-bar" }, el("span", { style: `width:${widthPct}%` })),
-      el("div", { class: "day-conf",
-        text: `уверенность ${(d.confidence * 100).toFixed(0)}% · ${SPECIES_LABEL[d.species] || d.species}` }),
+      head,
+      renderBestHoursStrip(d),
       dlMeta,
       renderThermoclineDiagram(d),
       factorsBox,
     );
+  }
+
+  // -- Best-hours horizontal 24h strip ----------------------------------
+  const KIND_COLOR = {
+    dawn: "#fbbf24",
+    dusk: "#f97316",
+    lunar_major: "#a78bfa",
+    lunar_minor: "#818cf8",
+  };
+
+  function renderBestHoursStrip(d) {
+    const windows = d.best_hours || [];
+    if (windows.length === 0) return null;
+    const W = 280, H = 26;
+    const dayStart = new Date(`${d.date}T00:00:00`);
+    const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
+    const toX = (iso) => {
+      const t = new Date(iso).getTime();
+      const frac = Math.max(0, Math.min(1,
+        (t - dayStart.getTime()) / (dayEnd.getTime() - dayStart.getTime())));
+      return frac * W;
+    };
+    const today = new Date();
+    const isToday = today.toDateString() === dayStart.toDateString();
+    const nowX = isToday ? toX(today.toISOString()) : null;
+
+    const svg = elNS("svg", {
+      class: "bh-svg", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none",
+    });
+    svg.append(elNS("line", {
+      x1: 0, x2: W, y1: H / 2, y2: H / 2, stroke: "#334155", "stroke-width": 1,
+    }));
+    for (const h of [6, 12, 18]) {
+      const x = (h / 24) * W;
+      svg.append(
+        elNS("line", { x1: x, x2: x, y1: H / 2 - 2, y2: H / 2 + 2, stroke: "#475569", "stroke-width": 1 }),
+        elNS("text", { x, y: H - 1, fill: "#64748b", "font-size": 9, "text-anchor": "middle" }, String(h)),
+      );
+    }
+    for (const w of windows) {
+      const x1 = toX(w.start);
+      const x2 = toX(w.end);
+      const width = Math.max(2, x2 - x1);
+      const rect = elNS("rect", {
+        x: x1, y: 3, width, height: H / 2 - 4,
+        fill: KIND_COLOR[w.kind] || "#94a3b8",
+        opacity: 0.4 + 0.6 * (w.intensity ?? 1),
+        rx: 2,
+      });
+      const fmt = (iso) => new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+      rect.append(elNS("title", null, `${w.label} ${fmt(w.start)}–${fmt(w.end)}`));
+      svg.append(rect);
+    }
+    if (nowX != null) {
+      svg.append(elNS("line", {
+        x1: nowX, x2: nowX, y1: 1, y2: H - 4, stroke: "#f87171", "stroke-width": 1.5,
+      }));
+    }
+
+    const legend = el("div", { class: "bh-legend" });
+    for (const w of windows) {
+      const fmt = (iso) => new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+      const color = KIND_COLOR[w.kind] || "#94a3b8";
+      legend.append(el("span", {
+        class: "bh-pill",
+        style: `background:${color}33; border-color:${color}; border-width:1px; border-style:solid;`,
+        text: `${w.label}: ${fmt(w.start)}–${fmt(w.end)}`,
+      }));
+    }
+    return el("div", { class: "best-hours" }, svg, legend);
   }
 
   // -- Thermocline mini-diagram -----------------------------------------
@@ -582,6 +913,24 @@
 
   async function loadHistory() {
     const days = Number($("historyDays").value || 30);
+    // Show skeletons inside chart hosts on first load (no data yet).
+    const firstLoad = state.waterHistory.length === 0 && state.weatherHistory.length === 0;
+    if (firstLoad) {
+      const sum = $("historySummary");
+      sum.innerHTML = "";
+      const sumGrid = el("div", { class: "history-summary" });
+      for (let i = 0; i < 4; i++) {
+        sumGrid.append(el("div", { class: "stat skeleton" },
+          el("div", { class: "sk-line sk-w-50" }),
+          el("div", { class: "sk-line sk-w-70", style: "height:16px;margin-top:4px" }),
+        ));
+      }
+      sum.append(sumGrid);
+      for (const id of ["chartWater", "chartTemp", "chartPressure", "chartWind"]) {
+        const host = $(id);
+        if (host) { host.innerHTML = ""; host.append(el("div", { class: "sk-chart" })); }
+      }
+    }
     try {
       const [wl, w] = await Promise.all([
         api(`/v1/water-level/history?days=${days}`),
@@ -595,29 +944,85 @@
     }
   }
 
+  // Build a single stat card: latest value + period average + delta with
+  // direction-coloured arrow. higherIsBetter flips the colour mapping
+  // (true = warmer/higher is good, false = e.g. less wind is good, null
+  // = neutral context — pressure/level changes don't have an inherent
+  // "better" direction).
+  function buildStatCard(spec) {
+    const { icon, label, value, avg, delta, deltaSuffix, deltaPrecision = 1, higherIsBetter } = spec;
+    const eps = deltaPrecision === 0 ? 0.5 : 0.05;
+    const direction = delta > eps ? "up" : delta < -eps ? "down" : "flat";
+    let cls = "neutral";
+    if (higherIsBetter === true) cls = direction === "up" ? "good" : direction === "down" ? "bad" : "neutral";
+    else if (higherIsBetter === false) cls = direction === "up" ? "bad" : direction === "down" ? "good" : "neutral";
+    else cls = direction === "flat" ? "neutral" : "info";
+    const arrow = direction === "up" ? "↑" : direction === "down" ? "↓" : "→";
+    const sign = delta >= 0 ? "+" : "";
+    return el("div", { class: "stat-card" },
+      el("div", { class: "stat-card-head" },
+        el("span", { class: "stat-icon", text: icon }),
+        el("span", { class: "stat-label", text: label })),
+      el("div", { class: "stat-value", text: value }),
+      el("div", { class: "stat-footer" },
+        el("span", { class: "stat-avg", text: avg }),
+        el("span", { class: `stat-delta stat-delta-${cls}`,
+          text: `${arrow} ${sign}${delta.toFixed(deltaPrecision)}${deltaSuffix}` })),
+    );
+  }
+
   function renderHistory() {
-    // Summary
     const sumWrap = $("historySummary");
     sumWrap.innerHTML = "";
-    if (state.waterHistory.length > 0) {
-      const first = state.waterHistory[0].level_m;
-      const last = state.waterHistory[state.waterHistory.length - 1].level_m;
-      const min = Math.min(...state.waterHistory.map((p) => p.level_m));
-      const max = Math.max(...state.waterHistory.map((p) => p.level_m));
-      const grid = el("div", { class: "history-summary" },
-        el("div", { class: "stat" },
-          el("div", { class: "k", text: "записей" }),
-          el("div", { class: "v", text: state.waterHistory.length })),
-        el("div", { class: "stat" },
-          el("div", { class: "k", text: "текущий" }),
-          el("div", { class: "v", text: `${last.toFixed(2)} м` })),
-        el("div", { class: "stat" },
-          el("div", { class: "k", text: "Δ за период" }),
-          el("div", { class: "v", text: `${fmtSigned(last - first, 2)} м` })),
-        el("div", { class: "stat" },
-          el("div", { class: "k", text: "мин / макс" }),
-          el("div", { class: "v", text: `${min.toFixed(2)} / ${max.toFixed(2)}` })),
-      );
+    if (state.waterHistory.length === 0 && state.weatherHistory.length === 0) {
+      // nothing to summarise yet
+    } else {
+      const grid = el("div", { class: "history-summary-cards" });
+      if (state.waterHistory.length > 0) {
+        const last = state.waterHistory[state.waterHistory.length - 1].level_m;
+        const avg = state.waterHistory.reduce((s, p) => s + p.level_m, 0) / state.waterHistory.length;
+        grid.append(buildStatCard({
+          icon: "💧", label: "Уровень воды",
+          value: `${last.toFixed(2)} м`,
+          avg: `средн. ${avg.toFixed(2)} м`,
+          delta: last - avg, deltaSuffix: " м", deltaPrecision: 2,
+          higherIsBetter: null,
+        }));
+      }
+      if (state.weatherHistory.length > 0) {
+        const last = state.weatherHistory[state.weatherHistory.length - 1];
+        const avg = (key) => state.weatherHistory.reduce((s, p) => s + (p[key] || 0), 0) / state.weatherHistory.length;
+        grid.append(buildStatCard({
+          icon: "🌊", label: "Tw воды",
+          value: `${last.water_temp_c.toFixed(1)}°C`,
+          avg: `средн. ${avg("water_temp_c").toFixed(1)}°C`,
+          delta: last.water_temp_c - avg("water_temp_c"), deltaSuffix: "°C",
+          higherIsBetter: null,
+        }));
+        grid.append(buildStatCard({
+          icon: "🌡", label: "Воздух",
+          value: `${last.air_temp_c.toFixed(1)}°C`,
+          avg: `средн. ${avg("air_temp_c").toFixed(1)}°C`,
+          delta: last.air_temp_c - avg("air_temp_c"), deltaSuffix: "°C",
+          higherIsBetter: null,
+        }));
+        grid.append(buildStatCard({
+          icon: "📊", label: "Давление",
+          value: `${last.pressure_hpa.toFixed(0)} hPa`,
+          avg: `средн. ${avg("pressure_hpa").toFixed(0)}`,
+          delta: last.pressure_hpa - avg("pressure_hpa"),
+          deltaSuffix: " hPa", deltaPrecision: 0,
+          higherIsBetter: null,
+        }));
+        grid.append(buildStatCard({
+          icon: "💨", label: "Ветер",
+          value: `${last.wind_speed_m_s.toFixed(1)} м/с`,
+          avg: `средн. ${avg("wind_speed_m_s").toFixed(1)}`,
+          delta: last.wind_speed_m_s - avg("wind_speed_m_s"),
+          deltaSuffix: " м/с",
+          higherIsBetter: false,
+        }));
+      }
       sumWrap.append(grid);
     }
 
@@ -719,64 +1124,85 @@
 
   function populatePushSelectors() {
     const zoneSel = $("pushZone");
-    zoneSel.innerHTML = "";
-    for (const z of ZONE_OPTIONS) {
-      zoneSel.append(el("option", { value: z.value, text: z.label }));
-    }
+    populateZoneSelect(zoneSel);
     zoneSel.value = state.pushForm.scope_zone || "";
     $("pushSpecies").value = state.pushForm.scope_species || "";
     $("pushName").value = state.pushForm.name || "";
 
+    repaintPushTypeSelect();
+  }
+
+  // Refresh the "type to add" dropdown — hides types already used so
+  // the user can't accidentally add a duplicate condition. Called on
+  // populate AND after every add/remove via renderPushConditions.
+  function repaintPushTypeSelect() {
     const typeSel = $("pushNewType");
+    if (!typeSel) return;
+    const used = new Set(state.pushForm.conditions.map((c) => c.type));
     typeSel.innerHTML = "";
-    for (const t of state.pushTypes) {
+    const available = state.pushTypes.filter((t) => !used.has(t.type));
+    if (available.length === 0) {
+      typeSel.append(el("option", { value: "", text: "— все типы добавлены" }));
+      typeSel.disabled = true;
+      return;
+    }
+    typeSel.disabled = false;
+    for (const t of available) {
       typeSel.append(el("option", { value: t.type, text: t.label }));
+    }
+    if (!available.some((t) => t.type === state.pushNewType)) {
+      state.pushNewType = available[0].type;
     }
     typeSel.value = state.pushNewType;
   }
 
+  // Render conditions as compact pill-shaped chips (mirrors web/).
+  // Each chip carries the type label, inline param inputs, and a small
+  // ✕ button to remove. The chip layout wraps horizontally so a recipe
+  // of 3-5 conditions stays compact even on a narrow phone screen.
   function renderPushConditions() {
-    const ul = $("pushConditions");
-    ul.innerHTML = "";
+    const wrap = $("pushConditions");
+    wrap.innerHTML = "";
     if (state.pushForm.conditions.length === 0) {
-      ul.append(el("li", null, el("div", { class: "hint", text: "пока ни одного условия — добавьте ниже" })));
+      wrap.append(el("div", { class: "hint", text: "Добавьте хотя бы одно условие — выбор ниже." }));
       return;
     }
+    const chipsBox = el("div", { class: "condition-chips" });
     state.pushForm.conditions.forEach((c, idx) => {
       const tdef = state.pushTypes.find((t) => t.type === c.type);
-      const li = el("li", null);
-      const left = el("div", { style: "flex:1" }, el("strong", { text: tdef?.label || c.type }));
       const params = tdef?.params_schema || [];
+      const chip = el("div", { class: "condition-chip" });
+
+      const remove = el("button", { class: "chip-remove", title: "Удалить" }, "×");
+      remove.addEventListener("click", () => {
+        state.pushForm.conditions.splice(idx, 1);
+        renderPushConditions();
+      });
+      chip.append(remove);
+      chip.append(el("div", { class: "chip-label", text: tdef?.label || c.type }));
+
       if (params.length > 0) {
-        const paramsRow = el("div", { class: "row", style: "margin-top:4px" });
+        const paramsBox = el("div", { class: "chip-params" });
         for (const p of params) {
-          const lab = el("label", { class: "field" },
-            el("span", { text: p.label }),
-            el("input", {
-              type: "number",
-              min: p.min, max: p.max, step: p.step,
-              value: c.params[p.name] ?? p.default,
-              onInput: (e) => {
-                c.params[p.name] = p.kind === "integer"
-                  ? parseInt(e.target.value || "0", 10)
-                  : Number(e.target.value);
-              },
-            }),
-          );
-          paramsRow.append(lab);
+          const inp = el("input", {
+            type: "number",
+            min: p.min, max: p.max, step: p.step,
+            value: c.params[p.name] ?? p.default,
+          });
+          inp.addEventListener("input", (e) => {
+            c.params[p.name] = p.kind === "integer"
+              ? parseInt(e.target.value || "0", 10)
+              : Number(e.target.value);
+          });
+          paramsBox.append(el("label", { class: "chip-param" },
+            el("span", { text: p.label }), inp));
         }
-        left.append(paramsRow);
+        chip.append(paramsBox);
       }
-      li.append(left, el("button", {
-        class: "danger",
-        text: "Удалить",
-        onClick: () => {
-          state.pushForm.conditions.splice(idx, 1);
-          renderPushConditions();
-        },
-      }));
-      ul.append(li);
+      chipsBox.append(chip);
     });
+    wrap.append(chipsBox);
+    repaintPushTypeSelect();
   }
 
   function renderPushSubs() {
@@ -892,6 +1318,42 @@
     };
   }
 
+  // Catch tab UI helpers ------------------------------------------------
+  // Pill-button group for species selection: clicking a pill flips the
+  // .active class and writes value into the hidden #catchSpecies input.
+  function selectCatchSpecies(value) {
+    $("catchSpecies").value = value;
+    document.querySelectorAll("#catchSpeciesPills .species-pill").forEach((b) => {
+      b.classList.toggle("active", b.dataset.species === value);
+    });
+  }
+  // Live update of score-slider: numeric value + filled fish glyphs.
+  function updateCatchScoreView() {
+    const score = Number($("catchScore").value);
+    $("catchScoreValue").textContent = `${score.toFixed(1)} / 5`;
+    const host = $("catchScoreFish");
+    host.innerHTML = "";
+    const filled = Math.max(0, Math.min(5, score));
+    for (let i = 1; i <= 5; i++) {
+      const portion = Math.max(0, Math.min(1, filled - (i - 1)));
+      host.append(el("span", { class: "score-fish-cell", style: `--fill:${portion * 100}%` }, "🐟"));
+    }
+  }
+  // Queue badge near the section heading + sync button visibility.
+  function updateCatchQueueBadge() {
+    const badge = $("catchQueueBadge");
+    if (!badge) return;
+    if (state.queue.length === 0) {
+      badge.hidden = true;
+      $("btnSyncQueue").hidden = true;
+    } else {
+      badge.hidden = false;
+      badge.textContent = `${state.queue.length} в очереди offline`;
+      $("btnSyncQueue").hidden = false;
+      $("btnSyncQueue").textContent = `↻ Sync очередь (${state.queue.length})`;
+    }
+  }
+
   function mapUrlFor(lat, lon) {
     const minLon = lon - 0.05, minLat = lat - 0.03;
     const maxLon = lon + 0.05, maxLat = lat + 0.03;
@@ -930,9 +1392,14 @@
       b.addEventListener("click", () => switchTab(b.dataset.tab));
     });
 
-    // Forecast controls
+    // Forecast controls — grouped zone selector (mirrors web/).
     const zoneSel = $("zone");
-    for (const z of ZONE_OPTIONS) zoneSel.append(el("option", { value: z.value, text: z.label }));
+    populateZoneSelect(zoneSel);
+    // Drop stale zone codes from localStorage (e.g. old upper/middle/lower).
+    if (state.zone && !ALL_ZONE_VALUES.includes(state.zone)) {
+      state.zone = "";
+      localStorage.removeItem("ff_zone");
+    }
     zoneSel.value = state.zone;
     zoneSel.addEventListener("change", () => {
       state.zone = zoneSel.value;
@@ -983,6 +1450,14 @@
     });
 
     // Catch
+    // Catch UI: species pills + score slider live updates.
+    document.querySelectorAll("#catchSpeciesPills .species-pill").forEach((b) => {
+      b.addEventListener("click", () => selectCatchSpecies(b.dataset.species));
+    });
+    $("catchScore").addEventListener("input", updateCatchScoreView);
+    updateCatchScoreView();
+    updateCatchQueueBadge();
+
     $("btnCatch").addEventListener("click", async () => {
       try { showOut("catchOut", await api("/v1/catch", { method: "POST", body: JSON.stringify(payloadFromCatchForm()) })); }
       catch (e) { showOut("catchOut", e.message); }
@@ -990,6 +1465,7 @@
     $("btnQueueCatch").addEventListener("click", () => {
       state.queue.push(payloadFromCatchForm());
       saveQueue();
+      updateCatchQueueBadge();
       showOut("catchOut", { status: "queued", queue_size: state.queue.length });
     });
     $("btnSyncQueue").addEventListener("click", async () => {
@@ -1006,6 +1482,7 @@
         }
       }
       saveQueue();
+      updateCatchQueueBadge();
       showOut("catchOut", { status: "sync_done", results, queue_left: state.queue.length });
     });
     $("btnUseCurrentLocation").addEventListener("click", () => {

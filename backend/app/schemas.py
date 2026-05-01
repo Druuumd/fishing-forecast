@@ -31,6 +31,18 @@ class ScoreFactor(BaseModel):
     detail: str | None = None
 
 
+class BestHourWindow(BaseModel):
+    """A window of expected high fishing activity. Times are UTC; UI
+    converts to the angler's local time. Multiple windows may overlap
+    (e.g. dawn coinciding with a lunar transit on a full-moon day).
+    """
+    start: datetime
+    end: datetime
+    label: str
+    kind: Literal["dawn", "dusk", "lunar_major", "lunar_minor"]
+    intensity: float = Field(ge=0, le=1)
+
+
 class ForecastDay(BaseModel):
     date: date
     species: FishSpecies
@@ -43,6 +55,11 @@ class ForecastDay(BaseModel):
     wind_speed_m_s: float
     wind_direction_deg: float = Field(ge=0, le=360)
     moon_phase: float = Field(ge=0, le=1)
+    moon_age_days: float | None = None
+    moon_illumination_pct: float | None = None
+    moon_phase_kind: str | None = None
+    moon_phase_label: str | None = None
+    moon_growing: bool | None = None
     cloud_cover_pct: float = Field(default=0.0, ge=0, le=100)
     precipitation_mm: float = Field(default=0.0, ge=0)
     humidity_pct: float = Field(default=0.0, ge=0, le=100)
@@ -60,6 +77,7 @@ class ForecastDay(BaseModel):
     thermocline_depth_m: int | None = None
     thermocline_recommended_depth_m: int | None = None
     thermocline_advice: str | None = None
+    best_hours: list[BestHourWindow] = Field(default_factory=list)
     stale: bool = False
     factors: list[ScoreFactor] = Field(default_factory=list)
 
@@ -197,6 +215,18 @@ class WaterTempReadingRecord(BaseModel):
 
 class WaterTempReadingsResponse(BaseModel):
     points: list[WaterTempReadingRecord]
+
+
+class ZoneCenter(BaseModel):
+    code: str
+    label: str
+    lat: float
+    lon: float
+    archetype: str | None = None
+
+
+class ZoneCentersResponse(BaseModel):
+    zones: list[ZoneCenter]
 
 
 class WaterLevelStateResponse(BaseModel):

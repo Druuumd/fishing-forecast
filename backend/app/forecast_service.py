@@ -233,10 +233,14 @@ class ForecastService:
         historical_snapshot_loader: Callable[[date], list[WeatherSnapshot]] | None = None,
         region: str = "krasnoyarsk",
         region_elevation_m: float | None = None,
+        location_lat: float = 55.0,
+        location_lon: float = 91.7,
     ) -> None:
         self._catch_repository = catch_repository
         self._historical_snapshot_loader = historical_snapshot_loader
         self._region = region.lower().strip()
+        self._location_lat = location_lat
+        self._location_lon = location_lon
         # Median water-edge elevation above sea level. Defaults reflect each
         # region's typical fishing surface; override via constructor / settings.
         defaults_m = {"krasnoyarsk": 234.0, "northwest": 10.0}
@@ -282,10 +286,27 @@ class ForecastService:
                     water_level=water_level,
                     zone=zone_profile,
                 )
+                # Decompose the raw moon phase fraction into the semantic
+                # fields the UI and push constructor work with.
+                from app.moon_phase import decompose as decompose_moon
+                moon = decompose_moon(snapshot.moon_phase)
+
                 # Zone-adjusted water temp drives the advisory the same way
-                # it drives the thermocline gate inside scoring.
+                # it drives the thermocline gate inside scoring. Recent wind
+                # window: prefer the 3 snapshots immediately preceding this
+                # forecast day if available (Open-Meteo gives past_days=2
+                # so the buffer naturally contains them).
                 zone_water_temp = snapshot.water_temp_c + zone_profile["water_temp_offset_c"]
-                tc = self.thermocline_advisory(water_temp_c=zone_water_temp, zone=zone_profile)
+                recent_winds = [
+                    s.wind_speed_m_s for s in snapshots
+                    if s.day < snapshot.day and (snapshot.day - s.day).days <= 3
+                ]
+                tc = self.thermocline_advisory(
+                    water_temp_c=zone_water_temp,
+                    zone=zone_profile,
+                    recent_wind_speeds_m_s=recent_winds or None,
+                )
+                bh = self.best_hours(snapshot)
                 days.append(
                     ForecastDay(
                         date=snapshot.day,
@@ -301,6 +322,11 @@ class ForecastService:
                         wind_speed_m_s=snapshot.wind_speed_m_s,
                         wind_direction_deg=snapshot.wind_direction_deg,
                         moon_phase=snapshot.moon_phase,
+                        moon_age_days=moon.age_days,
+                        moon_illumination_pct=moon.illumination_pct,
+                        moon_phase_kind=moon.phase_kind,
+                        moon_phase_label=moon.phase_label,
+                        moon_growing=moon.growing,
                         cloud_cover_pct=snapshot.cloud_cover_pct,
                         precipitation_mm=snapshot.precipitation_mm,
                         humidity_pct=snapshot.humidity_pct,
@@ -318,6 +344,7 @@ class ForecastService:
                         thermocline_depth_m=tc["depth_m"],
                         thermocline_recommended_depth_m=tc["recommended_depth_m"],
                         thermocline_advice=tc["advice"] or None,
+                        best_hours=bh,
                         stale=stale,
                         factors=factors,
                     )
@@ -653,6 +680,33 @@ class ForecastService:
         score += season_contrib
         factors.append(ScoreFactor(name="season", contribution=round(season_contrib, 3)))
 
+        # Species-specific spawning state (per-species temperature trigger,
+        # not the calendar-wide ban). Pre-spawn fattening = positive,
+        # active spawn = strong negative, post-spawn recovery = mild
+        # negative. Module is imported lazily so circular imports don't bite.
+        from app.species_spawning import species_spawn_state, species_spawn_factor_contribution
+        spawn = species_spawn_state(
+            species=species,
+            day=snapshot.day,
+            water_temp_c=zone_water_temp,
+            zone_code=zone.get("code") if zone else None,
+        )
+        spawn_contrib = species_spawn_factor_contribution(spawn)
+        if spawn.phase != "none":
+            score += spawn_contrib
+            phase_label = {
+                "pre": "предспрос (предспрос-жор)",
+                "active": "активный нерест",
+                "post": "посленерестовое восстановление",
+            }[spawn.phase]
+            factors.append(
+                ScoreFactor(
+                    name="species_spawn",
+                    contribution=round(spawn_contrib, 3),
+                    detail=f"{species}: {phase_label} (Tw={zone_water_temp:.1f}°C)",
+                )
+            )
+
         if bias:
             score += bias
             factors.append(ScoreFactor(name="ml_bias", contribution=round(bias, 3)))
@@ -971,11 +1025,90 @@ class ForecastService:
             return 0.08
         return 0.0
 
-    def thermocline_advisory(self, *, water_temp_c: float, zone: dict | None) -> dict:
+    def best_hours(self, snapshot: "WeatherSnapshot") -> list[dict]:
+        """Compute the best fishing-hour windows for a single forecast day.
+
+        Always returns dawn/dusk windows (±1h around sunrise/sunset) when
+        the snapshot has those times. Adds real solunar major and minor
+        windows from a lunar ephemeris (PyEphem) — upper/lower transits
+        and moon rise/set at the configured fishing location. Each
+        lunar window's intensity is scaled by an illumination-derived
+        quality multiplier so that quarter-moon windows are visibly
+        weaker than full/new-moon ones.
+
+        Output: list[dict] of {start, end, label, kind, intensity}, all
+        UTC datetimes (frontend renders in local time). Windows may
+        overlap; the UI stacks them.
+        """
+        out: list[dict] = []
+        sr = snapshot.sunrise
+        ss = snapshot.sunset
+        if sr is not None and ss is not None:
+            out.append({
+                "start": sr - timedelta(hours=1),
+                "end": sr + timedelta(hours=1),
+                "label": "Утренняя зорька",
+                "kind": "dawn",
+                "intensity": 1.0,
+            })
+            out.append({
+                "start": ss - timedelta(hours=1),
+                "end": ss + timedelta(hours=1),
+                "label": "Вечерняя зорька",
+                "kind": "dusk",
+                "intensity": 1.0,
+            })
+
+        # Real solunar windows from ephemeris.
+        try:
+            from app.solunar import compute_solunar_periods
+            sol = compute_solunar_periods(
+                target_date=snapshot.day,
+                lat=self._location_lat,
+                lon=self._location_lon,
+            )
+            quality = sol.get("quality", 0.5)
+            # Major: dimmer at quarters (0.4 floor) so the strip still
+            # shows them, but they're visually distinguishable from
+            # near-syzygy peaks.
+            for w in sol.get("major", []):
+                out.append({
+                    **w,
+                    "kind": "lunar_major",
+                    "intensity": round(max(0.4, 0.4 + 0.6 * quality), 2),
+                })
+            for w in sol.get("minor", []):
+                out.append({
+                    **w,
+                    "kind": "lunar_minor",
+                    "intensity": round(max(0.3, 0.3 + 0.4 * quality), 2),
+                })
+        except ImportError:
+            # ephem missing — fall back to dawn/dusk only.
+            pass
+        except Exception:
+            # Don't poison the forecast on any ephemeris glitch.
+            pass
+
+        out.sort(key=lambda w: w["start"])
+        return out
+
+    def thermocline_advisory(
+        self,
+        *,
+        water_temp_c: float,
+        zone: dict | None,
+        recent_wind_speeds_m_s: list[float] | None = None,
+    ) -> dict:
         """Estimate thermocline depth, strength, and recommended fishing depth.
 
         Inputs come from already-zone-adjusted water temp + the zone profile
         (specifically its archetype, which encodes typical depth structure).
+
+        ``recent_wind_speeds_m_s`` (optional): daily-mean wind speeds for
+        the past 2–3 days. Strong sustained wind (≥8 m/s average) mixes
+        the upper 5–7 m of the column and breaks the thermocline; we
+        scale strength down accordingly. None = ignore mixing (default).
 
         Returns a dict with:
           * strength: 0 (no stratification) → 1 (sharp summer thermocline).
@@ -1020,7 +1153,21 @@ class ForecastService:
         else:
             temp_strength = min(1.0, (water_temp_c - 12.0) / 10.0)  # 0 at 12, 1 at 22
 
-        strength = round(temp_strength * strat_capacity, 2)
+        # Wind-mixing modifier. Sustained ≥8 m/s wind for 2+ days
+        # disrupts the upper layer and erodes the cliff. We use the
+        # mean of provided recent winds, which the caller fills with
+        # daily averages from past Open-Meteo snapshots (typically the
+        # 2–3 days preceding the forecast day).
+        wind_mix = 1.0
+        if recent_wind_speeds_m_s:
+            avg_wind = sum(recent_wind_speeds_m_s) / len(recent_wind_speeds_m_s)
+            if avg_wind >= 8.0:
+                # Linear ramp: 8 m/s → ×0.5, 12+ m/s → ×0.2 (almost no
+                # stratification holds together after a multi-day gale).
+                excess = min(1.0, (avg_wind - 8.0) / 4.0)
+                wind_mix = 0.5 - 0.3 * excess  # 0.5 at 8 m/s, 0.2 at 12+
+
+        strength = round(temp_strength * strat_capacity * wind_mix, 2)
 
         # Approximate thermocline depth (m). Heuristic:
         # depth ≈ base_depth_for_archetype × (1 - 0.5 × wind_capacity_inverse)

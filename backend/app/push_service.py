@@ -50,6 +50,8 @@ class _Day:
     pressure_trend_24h_hpa: float
     daylight_hours: float
     factor_names: set[str]
+    moon_phase_kind: str | None = None
+    moon_growing: bool | None = None
 
 
 class ConditionEvaluator:
@@ -193,6 +195,37 @@ class WeekendOnly(ConditionEvaluator):
         return "только в выходные"
 
 
+class MoonGrowing(ConditionEvaluator):
+    type = "moon_growing"
+
+    def matches(self, day, params, *, today):
+        # Default: True (растущая луна). User can flip via params.
+        want = bool(params.get("growing", True))
+        return day.moon_growing is want
+
+    def describe(self, params):
+        want = bool(params.get("growing", True))
+        return "растущая луна" if want else "убывающая луна"
+
+
+class MoonPhaseIn(ConditionEvaluator):
+    type = "moon_phase_in"
+
+    def matches(self, day, params, *, today):
+        allowed = params.get("kinds") or []
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        return day.moon_phase_kind in set(allowed)
+
+    def describe(self, params):
+        allowed = params.get("kinds") or []
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        if not allowed:
+            return "лунная фаза (не задана)"
+        return f"фаза луны ∈ {{{', '.join(allowed)}}}"
+
+
 CONDITION_REGISTRY: dict[str, ConditionEvaluator] = {
     e.type: e
     for e in [
@@ -200,6 +233,7 @@ CONDITION_REGISTRY: dict[str, ConditionEvaluator] = {
         NoSevereWeather(), NoPrecipitation(), WaterTempMin(), WaterTempMax(),
         PressureStable(), CloudMax(), DaylightMin(), LookaheadMaxDays(),
         WeekendOnly(),
+        MoonGrowing(), MoonPhaseIn(),
     ]
 }
 
@@ -482,6 +516,9 @@ class PushService:
                 score, _, factors = self._forecast_service._score_with_factors(
                     fish_species, snap, water_level=water_level, zone=zone_profile,
                 )
+                # Pre-decompose moon for evaluators that ask about phase.
+                from app.moon_phase import decompose as decompose_moon
+                moon = decompose_moon(snap.moon_phase)
                 day_view = _Day(
                     date=snap.day, score=round(score, 2), species=fish_species,
                     air_temp_c=snap.air_temp_c, water_temp_c=snap.water_temp_c,
@@ -491,6 +528,8 @@ class PushService:
                     pressure_trend_24h_hpa=snap.pressure_trend_24h_hpa,
                     daylight_hours=snap.daylight_hours,
                     factor_names={f.name for f in factors},
+                    moon_phase_kind=moon.phase_kind,
+                    moon_growing=moon.growing,
                 )
                 if not self._matches_all(day_view, sub.conditions, today=today):
                     continue

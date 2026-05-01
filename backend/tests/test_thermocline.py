@@ -78,6 +78,43 @@ def test_advisory_grows_with_temperature(krasnoyarsk_service):
     assert warm["strength"] > cold["strength"]
 
 
+def test_recent_wind_does_not_affect_quiet_days(krasnoyarsk_service):
+    """Light winds (< 8 m/s) leave the thermocline alone."""
+    profile = krasnoyarsk_service._zone_profile("biryusa")
+    quiet = krasnoyarsk_service.thermocline_advisory(
+        water_temp_c=22.0, zone=profile,
+        recent_wind_speeds_m_s=[3.0, 4.0, 5.0],
+    )
+    none_winds = krasnoyarsk_service.thermocline_advisory(
+        water_temp_c=22.0, zone=profile,
+    )
+    assert quiet["strength"] == none_winds["strength"]
+
+
+def test_sustained_gale_breaks_thermocline(krasnoyarsk_service):
+    """Three-day average ≥8 m/s halves the thermocline strength."""
+    profile = krasnoyarsk_service._zone_profile("biryusa")
+    calm = krasnoyarsk_service.thermocline_advisory(
+        water_temp_c=22.0, zone=profile,
+    )
+    blown = krasnoyarsk_service.thermocline_advisory(
+        water_temp_c=22.0, zone=profile,
+        recent_wind_speeds_m_s=[10.0, 10.0, 10.0],
+    )
+    assert blown["strength"] < calm["strength"] * 0.6
+
+
+def test_extreme_gale_almost_eliminates_thermocline(krasnoyarsk_service):
+    """At 12+ m/s sustained the column is mostly mixed."""
+    profile = krasnoyarsk_service._zone_profile("main_channel")
+    blown = krasnoyarsk_service.thermocline_advisory(
+        water_temp_c=22.0, zone=profile,
+        recent_wind_speeds_m_s=[14.0, 13.0, 15.0],
+    )
+    # 1.0 capacity × 1.0 temp × 0.2 wind_mix = 0.2
+    assert blown["strength"] <= 0.25
+
+
 def test_zone_archetype_exposed_in_profile(krasnoyarsk_service):
     """The advisory needs the archetype, so the profile must expose it."""
     for code in ("syda", "main_channel", "tubinsky"):

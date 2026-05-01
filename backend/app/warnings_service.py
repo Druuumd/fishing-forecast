@@ -95,8 +95,48 @@ def compute_warnings(
         warnings.extend(_drawdown_warning(water_level_state))
 
     warnings.extend(_spawning_ban_warning(today, spawning_ban_start_md, spawning_ban_end_md))
+    warnings.extend(_species_spawning_warnings(today, forecast_days))
 
     return warnings
+
+
+def _species_spawning_warnings(today: date, days) -> list[Warning]:
+    """Per-species spawn advisories triggered by current water temperature.
+
+    Looks at today's first available snapshot (already zone-adjusted via
+    the forecast pipeline that builds these days). For each of pike /
+    perch / bream we emit at most one warning when the species enters
+    its active or post-spawn window. We pull the temperature from the
+    forecast day rather than guessing — the day already has whatever
+    zone offset and per-zone Open-Meteo data was used.
+    """
+    if not days:
+        return []
+    from app.species_spawning import species_spawn_state
+
+    out: list[Warning] = []
+    today_day = days[0]
+    tw = _attr(today_day, "water_temp_c")
+    day_date = _attr(today_day, "date")
+    if tw is None or day_date is None:
+        return []
+
+    severity_for_phase = {"active": SEVERITY_INFO, "post": SEVERITY_INFO}
+    for species_code in ("pike", "perch", "bream"):
+        state = species_spawn_state(
+            species=species_code, day=day_date,
+            water_temp_c=float(tw),
+        )
+        if state.phase not in ("active", "post"):
+            continue
+        out.append(Warning(
+            code=f"{species_code}_spawning",
+            severity=severity_for_phase[state.phase],
+            title=state.label,
+            body=state.body,
+            valid_from=day_date,
+        ))
+    return out
 
 
 # -- Individual rule helpers ---------------------------------------------

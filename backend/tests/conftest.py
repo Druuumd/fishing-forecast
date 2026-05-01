@@ -51,6 +51,8 @@ def make_snapshot(
     pressure_trend_6h_hpa: float = 0.0,
     pressure_trend_24h_hpa: float = 0.0,
     daylight_hours: float = 16.0,
+    sunrise=None,
+    sunset=None,
 ) -> WeatherSnapshot:
     """Concise factory for test snapshots — explicit kwargs for clarity."""
     return WeatherSnapshot(
@@ -67,6 +69,8 @@ def make_snapshot(
         pressure_trend_6h_hpa=pressure_trend_6h_hpa,
         pressure_trend_24h_hpa=pressure_trend_24h_hpa,
         daylight_hours=daylight_hours,
+        sunrise=sunrise,
+        sunset=sunset,
     )
 
 
