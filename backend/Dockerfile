@@ -13,7 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
-RUN chmod -R a+rX /app/alembic /app/alembic.ini
+# Tests live alongside the app so `pytest tests/` works inside the container
+# (used by CI and by `docker compose exec api pytest tests/`). They are
+# inert at runtime — uvicorn never imports them.
+COPY tests ./tests
+RUN chmod -R a+rX /app/alembic /app/alembic.ini /app/tests
 
 USER appuser
 

@@ -2,116 +2,347 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>KVH Forecast Mobile UX</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>KVH Forecast — мобильная версия</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <main class="app">
-    <header class="card">
-      <h1>KVH Forecast</h1>
-      <p class="muted">Mobile UX beta client</p>
-      <label class="field">
-        <span>Base URL</span>
-        <input id="baseUrl" value="http://84.22.146.195:8000" />
-      </label>
-      <div class="row">
-        <button id="btnSaveBase">Save</button>
-        <button id="btnCheckReady" class="secondary">Check Ready</button>
+    <header class="app-header">
+      <h1>🎣 KVH Forecast</h1>
+      <p class="muted">Прогноз клёва · Красноярское водохранилище</p>
+      <div id="offlineBanner" class="offline-banner" hidden>
+        📵 Нет сети. Показан последний загруженный прогноз — данные могут быть устаревшими.
       </div>
-      <pre id="readyOut" class="out"></pre>
     </header>
 
     <section class="card">
-      <h2>1) Login</h2>
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-tab="forecast">🎣 Прогноз</button>
+        <button class="tab" data-tab="history">📈 История</button>
+        <button class="tab" data-tab="catch">🐟 Улов</button>
+        <button class="tab" data-tab="water_temp">🌡 Замеры</button>
+        <button class="tab" data-tab="push">🔔 Уведомления</button>
+        <button class="tab" data-tab="profile">👤 Профиль</button>
+        <button class="tab" data-tab="settings">⚙️ Настройки</button>
+        <button class="tab" data-tab="consent">✅ Согласия</button>
+        <button class="tab" data-tab="privacy">🛡 Приватность</button>
+      </div>
+    </section>
+
+    <!-- Settings tab (API URL + ready check, moved from header) -->
+    <section class="card tab-pane" data-pane="settings" hidden>
+      <h2>⚙️ Настройки</h2>
+      <label class="field">
+        <span>API URL</span>
+        <input id="baseUrl" placeholder="https://kvh-forecast.ru" />
+      </label>
+      <div class="row">
+        <button id="btnSaveBase">Сохранить</button>
+        <button id="btnCheckReady" class="secondary">Проверить /ready</button>
+      </div>
+      <pre id="readyOut" class="out" hidden></pre>
+    </section>
+
+    <!-- Forecast tab -->
+    <section class="card tab-pane" data-pane="forecast">
+      <h2>Прогноз на 7 дней</h2>
+      <div class="row">
+        <label class="field">
+          <span>Вид</span>
+          <select id="species">
+            <option value="pike">щука</option>
+            <option value="perch">окунь</option>
+            <option value="bream">лещ</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Зона</span>
+          <select id="zone"></select>
+        </label>
+      </div>
+      <div class="row full">
+        <button id="btnForecast">Обновить</button>
+      </div>
+      <div id="forecastZoneLabel" class="hint" hidden></div>
+      <div id="warningsPanel" class="warnings-panel"></div>
+      <div id="waterBanner"></div>
+      <div id="forecastDays" class="day-grid"></div>
+      <pre id="forecastOut" class="out" hidden></pre>
+    </section>
+
+    <!-- History tab -->
+    <section class="card tab-pane" data-pane="history" hidden>
+      <h2>История условий</h2>
+      <div class="row">
+        <label class="field">
+          <span>Период</span>
+          <select id="historyDays">
+            <option value="14">14 дней</option>
+            <option value="30" selected>30 дней</option>
+            <option value="60">60 дней</option>
+          </select>
+        </label>
+        <button id="btnHistory" style="margin-top:18px">Обновить</button>
+      </div>
+      <div id="historySummary"></div>
+      <div class="chart-block">
+        <h3>Уровень воды (м)</h3>
+        <div id="chartWater"></div>
+      </div>
+      <div class="chart-block">
+        <h3>Температура воды и воздуха (°C)</h3>
+        <div id="chartTemp"></div>
+        <div class="chart-legend">
+          <span><span class="swatch" style="background:#0ea5e9"></span>вода</span>
+          <span><span class="swatch" style="background:#fbbf24"></span>воздух</span>
+        </div>
+      </div>
+      <div class="chart-block">
+        <h3>Давление (hPa)</h3>
+        <div id="chartPressure"></div>
+        <div class="chart-legend">
+          <span><span class="swatch" style="background:#a78bfa"></span>MSL</span>
+          <span><span class="swatch" style="background:#34d399"></span>surface@234м</span>
+        </div>
+      </div>
+      <div class="chart-block">
+        <h3>Ветер (м/с) и осадки (мм)</h3>
+        <div id="chartWind"></div>
+        <div class="chart-legend">
+          <span><span class="swatch" style="background:#f87171"></span>ветер</span>
+          <span><span class="swatch" style="background:#60a5fa"></span>осадки</span>
+        </div>
+      </div>
+      <h3>Мои уловы</h3>
+      <div id="catchListWrap"></div>
+    </section>
+
+    <!-- Catch tab -->
+    <section class="card tab-pane" data-pane="catch" hidden>
+      <h2>🐟 Записать улов</h2>
+      <p class="hint">
+        После отправки модель связывает улов с погодой того дня и
+        использует пары (условия → результат) для retrain.
+        <span id="catchQueueBadge" hidden class="queue-badge"></span>
+      </p>
+
+      <!-- Species: pill buttons -->
+      <div class="species-pills" id="catchSpeciesPills">
+        <button class="species-pill" data-species="pike" type="button">
+          <span class="species-pill-icon">🐊</span><span>Щука</span>
+        </button>
+        <button class="species-pill active" data-species="perch" type="button">
+          <span class="species-pill-icon">🐠</span><span>Окунь</span>
+        </button>
+        <button class="species-pill" data-species="bream" type="button">
+          <span class="species-pill-icon">🐟</span><span>Лещ</span>
+        </button>
+      </div>
+      <input id="catchSpecies" type="hidden" value="perch" />
+
+      <!-- Score: slider with fish visualisation -->
+      <label class="score-slider-label">
+        <div class="score-slider-row">
+          <span class="muted">Оценка клёва</span>
+          <span class="score-slider-value" id="catchScoreValue">4.1 / 5</span>
+        </div>
+        <input class="score-slider" id="catchScore" type="range" min="0" max="5" step="0.1" value="4.1" />
+        <div id="catchScoreFish" class="score-fish"></div>
+      </label>
+
+      <div class="row">
+        <label class="field">
+          <span>Широта</span>
+          <input id="catchLat" type="number" step="0.0001" value="55.0" />
+        </label>
+        <label class="field">
+          <span>Долгота</span>
+          <input id="catchLon" type="number" step="0.0001" value="91.7" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Заметка</span>
+        <input id="catchNote" placeholder="приманка, время, условия…" />
+      </label>
+      <div class="row full">
+        <button id="btnCatch">Отправить</button>
+      </div>
+      <div class="row">
+        <button id="btnQueueCatch" class="secondary">В очередь</button>
+        <button id="btnSyncQueue" class="secondary" hidden>↻ Sync очередь</button>
+      </div>
+      <div class="row full">
+        <button id="btnUseCurrentLocation" class="secondary">📍 GPS</button>
+      </div>
+      <iframe id="mapFrame" class="map" title="Map"></iframe>
+      <details class="debug-fold">
+        <summary>Подробности (debug)</summary>
+        <pre id="catchOut" class="out" hidden></pre>
+        <pre id="mapOut" class="out" hidden></pre>
+      </details>
+    </section>
+
+    <!-- User-submitted water-temperature readings -->
+    <section class="card tab-pane" data-pane="water_temp" hidden>
+      <h2>Замеры температуры воды</h2>
+      <p class="hint">
+        Делитесь замерами с эхолота или термометра — они помогают модели точнее
+        предсказывать клёв и однажды обучат расчёт термоклина. Координаты
+        автоматически привязываются к ближайшему заливу.
+      </p>
+      <div class="row">
+        <label class="field">
+          <span>Время замера</span>
+          <input id="wtMeasuredAt" type="datetime-local" />
+        </label>
+        <label class="field">
+          <span>Tw поверхность, °C</span>
+          <input id="wtSurface" type="number" step="0.1" min="0" max="30" value="12" />
+        </label>
+      </div>
+      <div class="row">
+        <label class="field">
+          <span>Широта</span>
+          <input id="wtLat" type="number" step="0.0001" value="55.0" />
+        </label>
+        <label class="field">
+          <span>Долгота</span>
+          <input id="wtLon" type="number" step="0.0001" value="91.7" />
+        </label>
+      </div>
+      <div class="row">
+        <label class="field">
+          <span>Глубина термоклина, м (опц.)</span>
+          <input id="wtDepth" type="number" step="0.5" min="1" max="60" />
+        </label>
+        <label class="field">
+          <span>Tw под термоклином, °C (опц.)</span>
+          <input id="wtBelow" type="number" step="0.1" min="1" max="10" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Прибор / способ</span>
+        <input id="wtInstrument" placeholder="эхолот, термометр…" />
+      </label>
+      <label class="field">
+        <span>Заметка</span>
+        <input id="wtNote" />
+      </label>
+      <div class="row">
+        <button id="btnWtSubmit">Отправить</button>
+        <button id="btnWtGeo" class="secondary">📍 GPS</button>
+      </div>
+      <div class="row full">
+        <button id="btnWtRefresh" class="secondary">Обновить список</button>
+      </div>
+      <div id="wtMap" class="map-leaflet"></div>
+      <div class="hint">Кликните по карте, чтобы подставить координаты.</div>
+      <div class="map-legend">
+        Цвет точки = Tw:
+        <span class="map-legend-pill" style="background:#0c4a6e">&lt;5°C</span>
+        <span class="map-legend-pill" style="background:#0ea5e9">5–10</span>
+        <span class="map-legend-pill" style="background:#22d3ee">10–15</span>
+        <span class="map-legend-pill" style="background:#84cc16">15–20</span>
+        <span class="map-legend-pill" style="background:#fb923c">20–25</span>
+        <span class="map-legend-pill" style="background:#dc2626">≥25</span>
+      </div>
+      <pre id="wtOut" class="out" hidden></pre>
+      <h3>Недавние замеры (всех)</h3>
+      <ul id="wtList" class="list"></ul>
+    </section>
+
+    <!-- Push notifications constructor -->
+    <section class="card tab-pane" data-pane="push" hidden>
+      <h2>Push-уведомления — конструктор</h2>
+      <p class="hint">
+        Соберите свой набор условий — уведомление придёт только для дня
+        в прогнозе, который удовлетворяет ВСЕМ условиям. Дубликаты на
+        один и тот же предсказанный день исключены.
+      </p>
+      <div id="pushUnavailable" class="hint" hidden></div>
+      <div id="pushForm" hidden>
+        <label class="field">
+          <span>Название (необязательно)</span>
+          <input id="pushName" placeholder="например: лещ на Сыде в выходные" />
+        </label>
+        <div class="row">
+          <label class="field">
+            <span>Зона</span>
+            <select id="pushZone"></select>
+          </label>
+          <label class="field">
+            <span>Вид</span>
+            <select id="pushSpecies">
+              <option value="">любой</option>
+              <option value="pike">щука</option>
+              <option value="perch">окунь</option>
+              <option value="bream">лещ</option>
+            </select>
+          </label>
+        </div>
+        <h3>Условия</h3>
+        <div id="pushConditions"></div>
+        <div class="row">
+          <select id="pushNewType"></select>
+          <button id="btnAddCondition" class="secondary">+ Добавить</button>
+        </div>
+        <div class="row">
+          <button id="btnSavePush">Сохранить подписку</button>
+          <button id="btnTestPush" class="secondary">Тест</button>
+        </div>
+      </div>
+      <h3>Активные подписки</h3>
+      <ul id="pushSubs" class="list"></ul>
+      <pre id="pushOut" class="out" hidden></pre>
+    </section>
+
+    <!-- Profile (login) -->
+    <section class="card tab-pane" data-pane="profile" hidden>
+      <h2>Профиль</h2>
       <label class="field"><span>Username</span><input id="username" value="demo" /></label>
       <label class="field"><span>Password</span><input id="password" value="demo123" type="password" /></label>
       <div class="row">
-        <button id="btnLogin">Login</button>
-        <button id="btnLogout" class="secondary">Logout</button>
+        <button id="btnLogin">Войти</button>
+        <button id="btnLogout" class="secondary">Выйти</button>
       </div>
-      <pre id="loginOut" class="out"></pre>
+      <pre id="loginOut" class="out" hidden></pre>
     </section>
 
-    <section class="card">
-      <h2>2) Forecast</h2>
-      <label class="field"><span>Species</span>
-        <select id="species">
-          <option value="pike">pike</option>
-          <option value="perch">perch</option>
-        </select>
-      </label>
-      <button id="btnForecast">Load Forecast</button>
-      <pre id="forecastOut" class="out"></pre>
-    </section>
-
-    <section class="card">
-      <h2>3) Catch + Offline Queue</h2>
-      <label class="field"><span>Species</span>
-        <select id="catchSpecies">
-          <option value="pike">pike</option>
-          <option value="perch" selected>perch</option>
-        </select>
-      </label>
-      <label class="field"><span>Score</span><input id="catchScore" type="number" min="0" max="5" step="0.1" value="4.1" /></label>
-      <label class="field"><span>Latitude</span><input id="catchLat" type="number" step="0.0001" value="55.99" /></label>
-      <label class="field"><span>Longitude</span><input id="catchLon" type="number" step="0.0001" value="92.88" /></label>
-      <label class="field"><span>Note</span><input id="catchNote" value="mobile-beta" /></label>
+    <!-- Consent -->
+    <section class="card tab-pane" data-pane="consent" hidden>
+      <h2>Согласия</h2>
+      <label class="check"><input type="checkbox" id="geoAllowed" /> Геолокация</label>
+      <label class="check"><input type="checkbox" id="pushAllowed" /> Push-уведомления</label>
+      <label class="check"><input type="checkbox" id="analyticsAllowed" /> Аналитика</label>
       <div class="row">
-        <button id="btnCatch">Send Catch</button>
-        <button id="btnQueueCatch" class="secondary">Queue Offline</button>
-        <button id="btnSyncQueue" class="secondary">Sync Queue</button>
+        <button id="btnLoadConsent" class="secondary">Загрузить</button>
+        <button id="btnSaveConsent">Сохранить</button>
       </div>
-      <pre id="catchOut" class="out"></pre>
+      <pre id="consentOut" class="out" hidden></pre>
     </section>
 
-    <section class="card">
-      <h2>4) Consent</h2>
-      <label class="check"><input type="checkbox" id="geoAllowed" /> Geo allowed</label>
-      <label class="check"><input type="checkbox" id="pushAllowed" /> Push allowed</label>
-      <label class="check"><input type="checkbox" id="analyticsAllowed" /> Analytics allowed</label>
+    <!-- Privacy / DSAR -->
+    <section class="card tab-pane" data-pane="privacy" hidden>
+      <h2>Данные и приватность</h2>
       <div class="row">
-        <button id="btnLoadConsent" class="secondary">Load</button>
-        <button id="btnSaveConsent">Save</button>
+        <button id="btnExportData">Экспорт</button>
+        <button id="btnDeleteData" class="danger">Удалить мои данные</button>
       </div>
-      <pre id="consentOut" class="out"></pre>
+      <pre id="dsarOut" class="out" hidden></pre>
+      <div class="row full">
+        <button id="btnLegalInfo" class="secondary">Юридическая инфо</button>
+      </div>
+      <pre id="legalOut" class="out" hidden></pre>
+      <ul id="legalLinks" class="list"></ul>
     </section>
 
-    <section class="card">
-      <h2>5) DSAR</h2>
-      <div class="row">
-        <button id="btnExportData">Export My Data</button>
-        <button id="btnDeleteData" class="danger">Delete My Data</button>
-      </div>
-      <pre id="dsarOut" class="out"></pre>
-    </section>
-
-    <section class="card">
-      <h2>6) Legal Links</h2>
-      <button id="btnLegalInfo">Load Legal Info</button>
-      <pre id="legalOut" class="out"></pre>
-      <ul id="legalLinks"></ul>
-    </section>
-
-    <section class="card">
-      <h2>7) Map + Geo</h2>
-      <div class="row">
-        <button id="btnUseCurrentLocation">Use Current Location</button>
-        <button id="btnOpenMap" class="secondary">Open Map</button>
-      </div>
-      <iframe id="mapFrame" class="map" title="Map"></iframe>
-      <pre id="mapOut" class="out"></pre>
-    </section>
-
-    <section class="card">
-      <h2>8) Push (Web beta)</h2>
-      <div class="row">
-        <button id="btnEnablePush">Enable Notifications</button>
-        <button id="btnTestPush" class="secondary">Test Notification</button>
-      </div>
-      <pre id="pushOut" class="out"></pre>
-    </section>
+    <footer class="footer">
+      <span id="queueStatus">Очередь: 0</span>
+      <span id="authStatus">гость</span>
+    </footer>
   </main>
   <script src="./app.js"></script>
 </body>

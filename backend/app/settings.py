@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +25,32 @@ class Settings(BaseSettings):
     location_lat: float = 55.99
     location_lon: float = 92.88
     forecast_region: str = "krasnoyarsk"
+    # Median water-edge elevation above sea level (m).
+    # Krasnoyarsk reservoir: UMO 226 m – NPU 243 m, median ~234 m.
+    forecast_region_elevation_m: float = 234.0
+    # Auto water-level scraping. Disabled by default until a verified
+    # source is wired. Manual admin entry remains the authoritative
+    # fallback. When enabled, weather ingest will best-effort attempt
+    # to refresh the level; failures are logged but do not break ingest.
+    water_level_scrape_enabled: bool = False
+    water_level_scrape_source: str = "allrivers"
+    water_level_scrape_page_url: str = "https://allrivers.info"
+    water_level_scrape_gauge_id: int = 0
+    water_level_scrape_timeout_sec: int = 15
+    # Web Push (VAPID) — generated once via `python -m app.push_vapid`.
+    # Keep both empty to disable push entirely (endpoints return 503).
+    vapid_public_key_b64: str = ""
+    vapid_private_key_pem: str = ""
+    vapid_subject: str = "mailto:legal@kvh-forecast.ru"
+    push_default_min_score: float = 3.5
+    push_lookahead_days: int = 5
+    # Spawning ban (нерестовый запрет) for Krasnoyarsk reservoir.
+    # Per приказ Минсельхоза №226 от 13.05.2020 (Правила рыболовства
+    # для Восточно-Сибирского рыбохозяйственного бассейна): для рек,
+    # озёр и водохранилищ Красноярского края — с 25 апреля по 25 июня.
+    # Operator can override via env if regulations are amended.
+    spawning_ban_start_md: str = "04-25"   # MM-DD
+    spawning_ban_end_md: str = "06-25"
     forecast_freshness_hours: int = 24
     ml_retrain_min_records: int = 20
     ml_smoke_max_mae: float = 1.0
@@ -42,6 +69,22 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @field_validator("vapid_private_key_pem", mode="before")
+    @classmethod
+    def _normalize_pem(cls, v):
+        # docker-compose env_file passes values as single-line strings.
+        # Restore real newlines from literal \n and strip wrapping quotes
+        # so the PEM ends up in the canonical multi-line format expected
+        # by cryptography / pywebpush.
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if (s.startswith("'") and s.endswith("'")) or (s.startswith('"') and s.endswith('"')):
+            s = s[1:-1]
+        if "\\n" in s and "\n" not in s:
+            s = s.replace("\\n", "\n")
+        return s
 
 
 @lru_cache
